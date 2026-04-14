@@ -21,16 +21,16 @@ jobs:
     - name: Download prebuilt Mesa binaries
       shell: powershell
       run: |
-        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0403/mesa_x64_wow64.7z -O mesa_x64_wow64.7z
-        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0403/vulkan_lvp_x64_wow64.7z -O vulkan_lvp_x64_wow64.7z
-        7z x -o"$PWD\mesa_prebuilt" mesa_x64_wow64.7z
-        7z x -o"$PWD\mesa_prebuilt" vulkan_lvp_x64_wow64.7z
+        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0414/mesa_x64_x86.7z -O mesa_x64_x86.7z
+        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0414/vulkan_lvp_x64_x86.7z -O vulkan_lvp_x64_x86.7z
+        7z x -o"$PWD\mesa_prebuilt" mesa_x64_x86.7z
+        7z x -o"$PWD\mesa_prebuilt" vulkan_lvp_x64_x86.7z
 
     - name: Build drivers
       shell: powershell
       run: |
-        $env:MESA_PREFIX = "$PWD\mesa_prebuilt\mesa_prefix"
-        $env:MESA_PREFIX_WOW64 = "$PWD\mesa_prebuilt\mesa_prefix_wow64"
+        $env:MESA_PREFIX_x64 = "$PWD\mesa_prebuilt\mesa_prefix_x64"
+        $env:MESA_PREFIX_x86 = "$PWD\mesa_prebuilt\mesa_prefix_x86"
         $env:VIRTIO_WIN_NO_ARM = "1"
         cd viogpu
         .\build_AllNoSdv.bat
