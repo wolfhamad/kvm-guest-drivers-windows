@@ -21,12 +21,12 @@ jobs:
     - name: Download prebuilt Mesa binaries
       shell: powershell
       run: |
-        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0414/mesa_x64_x86.7z -O mesa_x64_x86.7z
-        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0414/vulkan_lvp_x64_x86.7z -O vulkan_lvp_x64_x86.7z
+        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/latest/download/mesa_x64_x86.7z -O mesa_x64_x86.7z
+        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/latest/download/vulkan_lvp_x64_x86.7z -O vulkan_lvp_x64_x86.7z
         7z x -o"$PWD\mesa_prebuilt" mesa_x64_x86.7z
         7z x -o"$PWD\mesa_prebuilt" vulkan_lvp_x64_x86.7z
-        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0414/mesa_arm64.7z -O mesa_arm64.7z
-        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/download/akre-mesa-25.3.6-mingw-0414/vulkan_lvp_arm64.7z -O vulkan_lvp_arm64.7z
+        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/latest/download/mesa_arm64.7z -O mesa_arm64.7z
+        curl https://github.com/YWFhYmJi/virtio-win-mesa/releases/latest/download/vulkan_lvp_arm64.7z -O vulkan_lvp_arm64.7z
         7z x -o"$PWD\mesa_prebuilt" mesa_arm64.7z
         7z x -o"$PWD\mesa_prebuilt" vulkan_lvp_arm64.7z
 
