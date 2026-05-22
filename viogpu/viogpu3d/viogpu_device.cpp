@@ -57,14 +57,15 @@ NTSTATUS VioGpuDevice::GenerateBltPresent(DXGKARG_PRESENT *pPresent, VioGpuAlloc
 {
     UCHAR *dmaBuf = (UCHAR *)pPresent->pDmaBuffer;
 
-    // Calculate rect covering all SubRectx
+    // Cover-rect union over the destination sub-rects: top/left use
+    // min, right/bottom use max.
     RECT coverRect = pPresent->pDstSubRects[0];
     for (UINT i = 1; i < pPresent->SubRectCnt; i++)
     {
         coverRect.top = min(coverRect.top, pPresent->pDstSubRects[i].top);
         coverRect.left = min(coverRect.left, pPresent->pDstSubRects[i].left);
-        coverRect.right = min(coverRect.right, pPresent->pDstSubRects[i].right);
-        coverRect.bottom = min(coverRect.bottom, pPresent->pDstSubRects[i].bottom);
+        coverRect.right = max(coverRect.right, pPresent->pDstSubRects[i].right);
+        coverRect.bottom = max(coverRect.bottom, pPresent->pDstSubRects[i].bottom);
     }
 
     INT dx = pPresent->SrcRect.left - pPresent->DstRect.left;
