@@ -106,6 +106,10 @@ class VioGpuBuf
     PGPU_VBUFFER GetBuf(_In_ int size, _In_ int resp_size, _In_opt_ void *resp_buf);
     void FreeBuf(_In_ PGPU_VBUFFER pbuf);
     BOOLEAN Init(_In_ UINT cnt);
+    // Cancel and release every vbuf that is still on the in-use list,
+    // firing each callback once so any caller waiting on a wait-context
+    // is unblocked (the callback releases its own ref).
+    void DrainInUse(void);
 
   private:
     void Close(void);
@@ -204,8 +208,11 @@ class VioGpuQueue
                _In_opt_ void *va_indirect,
                _In_ ULONGLONG phys_indirect)
     {
+        // Return -1 on a closed queue so callers can distinguish it from
+        // success (0): otherwise an AddBuf after Close would look like
+        // a queued request whose completion never arrives.
         return m_pVirtQueue ? virtqueue_add_buf(m_pVirtQueue, sg, out_num, in_num, data, va_indirect, phys_indirect)
-                            : 0;
+                            : -1;
     }
     void *GetBuf(_Out_ UINT *len)
     {

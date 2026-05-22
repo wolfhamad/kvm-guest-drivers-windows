@@ -1550,6 +1550,65 @@ BOOLEAN VioGpuBuf::Init(_In_ UINT cnt)
     return (m_uCount > 0);
 }
 
+void VioGpuBuf::DrainInUse(void)
+{
+    KIRQL OldIrql;
+
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
+    ASSERT(KeGetCurrentIrql() < DISPATCH_LEVEL);
+
+    // Collect in-use vbufs under the lock, then process them outside
+    // the lock so callbacks that take other locks (e.g., the queue
+    // lock during ReleaseBuffer) do not deadlock.
+    LIST_ENTRY cancelled;
+    InitializeListHead(&cancelled);
+
+    KeAcquireSpinLock(&m_SpinLock, &OldIrql);
+    while (!IsListEmpty(&m_InUseBufs))
+    {
+        PLIST_ENTRY entry = RemoveHeadList(&m_InUseBufs);
+        InsertTailList(&cancelled, entry);
+    }
+    KeReleaseSpinLock(&m_SpinLock, OldIrql);
+
+    while (!IsListEmpty(&cancelled))
+    {
+        PLIST_ENTRY entry = RemoveHeadList(&cancelled);
+        PGPU_VBUFFER pvbuf = CONTAINING_RECORD(entry, GPU_VBUFFER, list_entry);
+
+        if (pvbuf->complete_cb)
+        {
+            pvbuf->complete_cb(pvbuf->complete_ctx);
+        }
+
+        KeAcquireSpinLock(&m_SpinLock, &OldIrql);
+        if (pvbuf->resp_buf && pvbuf->resp_size > MAX_INLINE_RESP_SIZE)
+        {
+            delete[] reinterpret_cast<PBYTE>(pvbuf->resp_buf);
+            pvbuf->resp_buf = NULL;
+            pvbuf->resp_size = 0;
+        }
+        if (pvbuf->data_buf)
+        {
+            delete[] reinterpret_cast<PBYTE>(pvbuf->data_buf);
+            pvbuf->data_buf = NULL;
+            pvbuf->data_size = 0;
+        }
+        if (m_uCount > m_uCountMin)
+        {
+            delete[] reinterpret_cast<PBYTE>(pvbuf);
+            --m_uCount;
+        }
+        else
+        {
+            InsertTailList(&m_FreeBufs, &pvbuf->list_entry);
+        }
+        KeReleaseSpinLock(&m_SpinLock, OldIrql);
+    }
+
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("<--- %s\n", __FUNCTION__));
+}
+
 void VioGpuBuf::Close(void)
 {
     KIRQL OldIrql;

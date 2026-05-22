@@ -305,7 +305,11 @@ NTSTATUS VioGpuAdapter::StopDevice(VOID)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
     vidpn.Stop();
-    virtio_device_reset(&m_VioDev);
+
+    // Full per-PnP-session teardown: leaves IsHardwareInit() == FALSE
+    // so the next StartDevice's VioGpuAdapterInit re-initialises virtio,
+    // the worker thread, and the queues.
+    VioGpuAdapterClose();
 
     m_Flags.DriverStarted = FALSE;
     return STATUS_SUCCESS;
@@ -1855,12 +1859,37 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
     return status;
 }
 
+void VioGpuAdapter::StopWorkerThread(void)
+{
+    PAGED_CODE();
+    if (!m_pWorkThread)
+    {
+        return;
+    }
+
+    m_bStopWorkThread = TRUE;
+    KeSetEvent(&m_ConfigUpdateEvent, IO_NO_INCREMENT, FALSE);
+
+    LARGE_INTEGER timeout = {0};
+    timeout.QuadPart = Int32x32To64(1000, -10000);
+    if (KeWaitForSingleObject(m_pWorkThread, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("---> Failed to exit the worker thread\n"));
+        VioGpuDbgBreak();
+    }
+    ObDereferenceObject(m_pWorkThread);
+    m_pWorkThread = NULL;
+}
+
 void VioGpuAdapter::VioGpuAdapterClose()
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_FATAL, ("---> %s\n", __FUNCTION__));
     vidpn.StopVsyncTimer();
-    m_shmem_allocator.Reset();
+
+    // Drain the worker thread before tearing down the queues: its
+    // ConfigChanged handler issues AskDisplayInfo on the ctrl queue.
+    StopWorkerThread();
 
     if (IsHardwareInit())
     {
@@ -1872,7 +1901,15 @@ void VioGpuAdapter::VioGpuAdapterClose()
         ctrlQueue.Close();
         m_CursorQueue.Close();
         virtio_device_shutdown(&m_VioDev);
+        // Must run after virtio_device_shutdown so no completion DPC
+        // races the drain. Fires each pending callback once (releasing
+        // wait-context refs) and frees the attached payloads.
+        m_GpuBuf.DrainInUse();
     }
+    // m_shmem_allocator belongs to HWClose: DXGK-owned VioGpuAllocation
+    // objects survive D3 with their m_blob_offset values held, so a
+    // reset on D3 entry would let a post-resume allocation alias a
+    // still-live offset.
     DbgPrint(TRACE_LEVEL_FATAL, ("<--- %s\n", __FUNCTION__));
 }
 
@@ -2120,22 +2157,14 @@ NTSTATUS VioGpuAdapter::HWClose(void)
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
     SetHardwareInit(FALSE);
 
-    LARGE_INTEGER timeout = {0};
-    timeout.QuadPart = Int32x32To64(1000, -10000);
+    // Defensive: VioGpuAdapterClose normally drained the thread already;
+    // StopWorkerThread is a no-op when m_pWorkThread is NULL.
+    StopWorkerThread();
 
-    m_bStopWorkThread = TRUE;
-    KeSetEvent(&m_ConfigUpdateEvent, IO_NO_INCREMENT, FALSE);
-
-    if (m_pWorkThread)
-    {
-    if (KeWaitForSingleObject(m_pWorkThread, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
-    {
-        DbgPrint(TRACE_LEVEL_FATAL, ("---> Failed to exit the worker thread\n"));
-        VioGpuDbgBreak();
-    }
-
-    ObDereferenceObject(m_pWorkThread);
-    }
+    // Safe to reset only here: at HWClose, DXGK has destroyed every
+    // VioGpuAllocation, so no live m_blob_offset can alias the
+    // freshened free list.
+    m_shmem_allocator.Reset();
 
     frameSegment.Close();
 

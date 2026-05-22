@@ -277,6 +277,7 @@ class VioGpuAdapter : IVioGpuPCI, public IVioGpuQueueSync
 
     NTSTATUS VioGpuAdapterInit();
     void VioGpuAdapterClose(void);
+    void StopWorkerThread(void);
     NTSTATUS VirtIoDeviceInit(void);
     BOOLEAN AckFeature(UINT64 Feature);
 
