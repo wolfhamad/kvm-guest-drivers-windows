@@ -457,18 +457,24 @@ VioGpuDeviceAllocation::VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAlloc
 
     m_pAllocation = allocation;
     m_pDevice = device;
+    m_attached = false;
 
     m_pAllocation->EnsureBlobCreated(m_pDevice->GetId());
     m_pDevice->GetCtrlQueue()->CtxResource(true, m_pDevice->GetId(), m_pAllocation->GetId());
+    m_attached = true;
 }
 
 VioGpuDeviceAllocation::~VioGpuDeviceAllocation()
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("<---> %s res_id=%d ctx_id=%d\n", __FUNCTION__, m_pAllocation->GetId(), m_pDevice->GetId()));
+             ("<---> %s res_id=%d ctx_id=%d attached=%d\n",
+              __FUNCTION__, m_pAllocation->GetId(), m_pDevice->GetId(), m_attached));
 
-    m_pDevice->GetCtrlQueue()->CtxResource(false, m_pDevice->GetId(), m_pAllocation->GetId());
+    if (m_attached)
+    {
+        m_pDevice->GetCtrlQueue()->CtxResource(false, m_pDevice->GetId(), m_pAllocation->GetId());
+    }
 }
 
 VioGpuAllocation *VioGpuDeviceAllocation::GetAllocation()

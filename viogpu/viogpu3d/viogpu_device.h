@@ -59,4 +59,9 @@ class VioGpuDeviceAllocation
   private:
     VioGpuAllocation *m_pAllocation;
     VioGpuDevice *m_pDevice;
+    // Whether CTX_ATTACH_RESOURCE actually issued. The destructor
+    // skips DETACH if FALSE so we never send a stray DETACH for a
+    // pair that never attached (e.g., when OpenAllocation's blob
+    // create fails after the device-allocation is constructed).
+    bool m_attached;
 };
