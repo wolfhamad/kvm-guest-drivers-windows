@@ -578,7 +578,11 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     if (segment_id == 2) {
         allocationInfo->Alignment = PAGE_SIZE;
         allocationInfo->Size = (SIZE_T)allocation->GetBlobSize();
-        allocationInfo->EvictionSegmentSet = 0;
+        // Use segment 2 as the eviction aperture for blob allocations.
+        // EvictionSegmentSet=0 routes VidMm through the direct-transfer
+        // path, which BuildPagingBuffer here doesn't implement, so shmem
+        // would never free.
+        allocationInfo->EvictionSegmentSet = segment_mask;
     }
 
     DbgPrint(TRACE_LEVEL_INFORMATION,
