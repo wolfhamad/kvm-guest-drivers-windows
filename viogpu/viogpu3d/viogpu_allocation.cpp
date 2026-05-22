@@ -591,12 +591,32 @@ NTSTATUS VioGpuAllocation::DescribeAllocation(DXGKARG_DESCRIBEALLOCATION *pDescr
 
     pDescribeAllocation->Format = VioGpuToD3DDDIColorFormat((virtio_gpu_formats)m_options.format);
 
-    // this values are RANDOM
-    pDescribeAllocation->MultisampleMethod.NumQualityLevels = 2;
-    pDescribeAllocation->MultisampleMethod.NumSamples = 2;
+    // Multisample mirrors the resource's nr_samples: 0 or 1 means
+    // non-MSAA, anything else is MSAA with a single quality level
+    // (vendor-specific quality variants are not surfaced).
+    if (m_options.nr_samples > 1)
+    {
+        pDescribeAllocation->MultisampleMethod.NumQualityLevels = 1;
+        pDescribeAllocation->MultisampleMethod.NumSamples = (UCHAR)m_options.nr_samples;
+    }
+    else
+    {
+        pDescribeAllocation->MultisampleMethod.NumQualityLevels = 0;
+        pDescribeAllocation->MultisampleMethod.NumSamples = 1;
+    }
 
-    pDescribeAllocation->RefreshRate.Numerator = 148500000;
-    pDescribeAllocation->RefreshRate.Denominator = 2475000;
+    // Refresh rate: active VidPN mode's rate if a source is pinned,
+    // otherwise 60/1 as a safe default.
+    D3DDDI_RATIONAL refresh = m_adapter->vidpn.GetActiveRefreshRate();
+    if (refresh.Numerator && refresh.Denominator)
+    {
+        pDescribeAllocation->RefreshRate = refresh;
+    }
+    else
+    {
+        pDescribeAllocation->RefreshRate.Numerator = 60;
+        pDescribeAllocation->RefreshRate.Denominator = 1;
+    }
 
     return STATUS_SUCCESS;
 };

@@ -2158,6 +2158,24 @@ void VioGpuVidPN::VsyncNotifyTimerDpc(KDPC *dpc, PVOID deferredContext, PVOID sy
 }
 
 
+D3DDDI_RATIONAL VioGpuVidPN::GetActiveRefreshRate() const
+{
+    D3DDDI_RATIONAL rate = {0, 0};
+    // m_CurrentModeIndex/Numbers point at the active mode; in single-
+    // source builds the mode's frequency is the source refresh.
+    if (m_ModeInfo && m_CurrentModeIndex < m_ModeCount)
+    {
+        ULONG hz = m_ModeInfo[m_CurrentModeIndex].DriverSpecificAttributeFlags;
+        if (hz == 0)
+        {
+            hz = 60;
+        }
+        rate.Numerator = hz;
+        rate.Denominator = 1;
+    }
+    return rate;
+}
+
 NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
 {
     VioGpuAllocation *newRes = reinterpret_cast<VioGpuAllocation *>(pSetVidPnSourceAddress->hAllocation);
