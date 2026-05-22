@@ -213,6 +213,7 @@ VioGpuAllocation::~VioGpuAllocation(void)
 
     ASSERT(m_busy == 0);
 
+    bool blob_was_mapped = false;
     ExAcquireFastMutex(&m_blob_map_mutex);
     if (!IsListEmpty(&m_blob_map_list))
     {
@@ -257,11 +258,16 @@ VioGpuAllocation::~VioGpuAllocation(void)
         delete map;
     }
     m_blob_map_user_refs = 0;
+    // m_blob_mapped is mutated and read under m_blob_map_mutex
+    // (EscapeResourceMapBlob is the other writer). Snapshot it here so
+    // the unmap decision below uses the same view as the map-list
+    // teardown above.
+    blob_was_mapped = m_blob_mapped;
     ExReleaseFastMutex(&m_blob_map_mutex);
 
     const bool resource_created = m_is_blob ? m_blob_created : (m_resource_created != 0);
 
-    if (resource_created && m_is_blob && m_blob_mapped)
+    if (resource_created && m_is_blob && blob_was_mapped)
     {
         m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);
     }
