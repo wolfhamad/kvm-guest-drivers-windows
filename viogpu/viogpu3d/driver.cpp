@@ -495,7 +495,9 @@ VioGpu3DDestroyAllocation(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_DESTROY
             VIOGPU_RES_BUSY_REQ resBusy;
             resBusy.Wait = 1;
             allocation->EscapeResourceBusy(&resBusy);
-            delete allocation;
+            // Release the DXGK reference; in-flight async blob-create
+            // callbacks hold their own ref and complete the deletion.
+            allocation->Release();
         }
     }
 

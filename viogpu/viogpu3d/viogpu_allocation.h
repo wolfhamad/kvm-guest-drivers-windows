@@ -24,6 +24,13 @@ class VioGpuAllocation
     VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCATION_EXCHANGE *exchange);
     ~VioGpuAllocation(void);
 
+    // Refcounting: constructor starts at 1 (the DXGK reference). AddRef
+    // before publishing this pointer to an async path that may outlive
+    // DestroyAllocation; the matching Release runs in the callback. The
+    // object is deleted when the count reaches zero.
+    void AddRef();
+    void Release();
+
     UINT GetId(void)
     {
         return m_Id;
@@ -139,4 +146,6 @@ class VioGpuAllocation
 
     KEVENT m_busyNotification;
     volatile LONG m_busy;
+
+    volatile LONG m_refCount;
 };

@@ -49,6 +49,9 @@ void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
 {
     PVIOGPU_COMPLETE_CTX ctx = (PVIOGPU_COMPLETE_CTX)ctx_void;
     if (!ctx || !ctx->owner) {
+        if (ctx) {
+            delete ctx;
+        }
         return;
     }
 
@@ -76,6 +79,7 @@ void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=0x%x\n", __FUNCTION__, alloc->GetId()));
 
     delete ctx;
+    alloc->Release();
 }
 
 VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCATION_EXCHANGE *exchange)
@@ -117,7 +121,24 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
     m_busy = 0;
 
+    m_refCount = 1;
+
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
+}
+
+void VioGpuAllocation::AddRef()
+{
+    InterlockedIncrement(&m_refCount);
+}
+
+void VioGpuAllocation::Release()
+{
+    LONG newCount = InterlockedDecrement(&m_refCount);
+    ASSERT(newCount >= 0);
+    if (newCount == 0)
+    {
+        delete this;
+    }
 }
 
 NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
@@ -147,6 +168,11 @@ NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
     ctx->user_ctx = complete_ctx;
     ctx->owner = this;
 
+    // Keep the allocation alive across the async callback. Released in
+    // BlobCreateCompleteCB; released here on the queue-submit failure
+    // path before the callback ever runs.
+    AddRef();
+
     status = m_adapter->ctrlQueue.CreateResourceBlob(m_Id,
                                                         m_blob_size,
                                                         m_blob_mem,
@@ -161,6 +187,7 @@ NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
         m_blob_create_status = status;
         InterlockedExchange(&m_blob_create_state, 0);
         delete ctx;
+        Release();
         return status;
     }
 
@@ -478,7 +505,7 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     VioGpuAllocation *allocation = new (NonPagedPoolNx) VioGpuAllocation(adapter, resourceExchange);
     if (!allocation->IsValid())
     {
-        delete allocation;
+        allocation->Release();
         return STATUS_UNSUCCESSFUL;
     }
     const bool is_blob = allocation->IsBlob();
@@ -486,7 +513,7 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     {
         DbgPrint(TRACE_LEVEL_ERROR,
                  ("<--- %s blob allocation requires shared memory\n", __FUNCTION__));
-        delete allocation;
+        allocation->Release();
         return STATUS_NOT_SUPPORTED;
     }
 
@@ -501,7 +528,7 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
             DbgPrint(TRACE_LEVEL_ERROR,
                      ("<--- %s shmem alloc failed size=0x%llx shmem_len=0x%llx\n",
                       __FUNCTION__, alloc_size, adapter->GetShmemLen()));
-            delete allocation;
+            allocation->Release();
             return STATUS_INSUFFICIENT_RESOURCES;
         }
         allocation->m_blob_offset = offset;
