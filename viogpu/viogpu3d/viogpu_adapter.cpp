@@ -1473,12 +1473,15 @@ VOID VioGpuAdapter::ProcessCtrlQueueBuffer(PGPU_VBUFFER pvbuf, UINT len)
                   pcmd->type));
     }
 
-    const bool auto_release = pvbuf->auto_release;
     if (pvbuf->complete_cb != NULL)
     {
         pvbuf->complete_cb(pvbuf->complete_ctx);
     }
-    if (auto_release)
+    // Re-read auto_release after the callback. The shared wait-context
+    // callback may flip auto_release from false to true when the
+    // original caller has already timed out and given up its ref, so
+    // the DPC has to take responsibility for releasing the vbuf.
+    if (pvbuf->auto_release)
     {
         ctrlQueue.ReleaseBuffer(pvbuf);
     }

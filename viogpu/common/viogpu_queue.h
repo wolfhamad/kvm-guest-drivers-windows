@@ -71,6 +71,20 @@ typedef struct viogpu_complete_ctx
 } VIOGPU_COMPLETE_CTX, *PVIOGPU_COMPLETE_CTX;
 // #pragma pack()
 
+typedef struct viogpu_wait_ctx
+{
+    KEVENT event;
+    volatile LONG refCount;
+    PGPU_VBUFFER vbuf;
+} VIOGPU_WAIT_CTX, *PVIOGPU_WAIT_CTX;
+
+PVIOGPU_WAIT_CTX VioGpuAllocWaitCtx();
+void VioGpuWaitCtxCompleteCB(void *ctx);
+BOOLEAN VioGpuWaitCtxFinish(PVIOGPU_WAIT_CTX ctx,
+                            PGPU_VBUFFER vbuf,
+                            class VioGpuQueue *queue,
+                            NTSTATUS waitStatus);
+
 typedef BOOLEAN (*VIOGPU_SYNC_EXEC_ROUTINE)(void *ctx);
 
 class IVioGpuQueueSync
