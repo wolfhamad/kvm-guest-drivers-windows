@@ -48,7 +48,14 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 #endif
     m_submitFlagsValue = pSubmitCommand->Flags.Value;
     m_submitPaging = pSubmitCommand->Flags.Paging ? TRUE : FALSE;
-    m_expectedEmptySubmit = (pSubmitCommand->Flags.Paging != 0) &&
+    // Submissions that arrive with an empty DMA range are fence-only:
+    //   - Paging: paging buffers can be empty (fence-only sync points).
+    //   - ContextSwitch: documented as zero-length per DXGK_SUBMITCOMMANDFLAGS.
+    //   - Flip: viogpu3d's DxgkDdiPresent emits no DMA for the flip path,
+    //     so DXGK passes the flip through as a fence-only submission.
+    m_expectedEmptySubmit = (pSubmitCommand->Flags.Paging != 0 ||
+                             pSubmitCommand->Flags.ContextSwitch != 0 ||
+                             pSubmitCommand->Flags.Flip != 0) &&
                             (pSubmitCommand->DmaBufferSubmissionEndOffset <=
                              pSubmitCommand->DmaBufferSubmissionStartOffset);
     if (m_pDmaBuffer)
