@@ -370,6 +370,7 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
     ULONG BytesRead = 0;
     NTSTATUS Status = STATUS_SUCCESS;
     bool interrupt_found = false;
+    bool memory_found = false;
     int bar = -1;
 
     m_pDxgkInterface = pDxgkInterface;
@@ -447,6 +448,7 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
                             break;
                         }
                         m_Bars[bar] = CPciBar(Start, len, false, true);
+                        memory_found = true;
                     }
                     break;
                 case CmResourceTypeMemoryLarge:
@@ -455,13 +457,14 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
                         PHYSICAL_ADDRESS Start;
                         len = RtlCmDecodeMemIoResource(pResDescriptor, (PULONGLONG)&Start.QuadPart);
                         bar = virtio_get_bar_index(&pci_config, Start);
-                        DbgPrint(TRACE_LEVEL_VERBOSE, ("Found CM_RESOURCE_MEMORY_LARGE_XXX start=%llx len=%llx bar=%x\n", 
+                        DbgPrint(TRACE_LEVEL_VERBOSE, ("Found CM_RESOURCE_MEMORY_LARGE_XXX start=%llx len=%llx bar=%x\n",
                             Start.QuadPart, len, bar));
                         if (bar < 0)
                         {
                             break;
                         }
                         m_Bars[bar] = CPciBar(Start, len, false, true);
+                        memory_found = true;
                     }
                     break;
                 case CmResourceTypeDma:
@@ -479,9 +482,11 @@ bool CPciResources::Init(PDXGKRNL_INTERFACE pDxgkInterface, PCM_RESOURCE_LIST pR
             }
         }
     }
-    if (bar < 0 || !interrupt_found)
+    if (!memory_found || !interrupt_found)
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("[%s] resource enumeration failed\n", __FUNCTION__));
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("[%s] resource enumeration failed memory=%d interrupt=%d\n",
+                  __FUNCTION__, memory_found, interrupt_found));
         return false;
     }
     return true;
