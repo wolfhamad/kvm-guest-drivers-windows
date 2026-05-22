@@ -1520,9 +1520,11 @@ VOID VioGpuAdapter::DpcRoutine(VOID)
     PGPU_VBUFFER pvbuf = NULL;
     UINT len = 0;
     ULONG reason;
+    BOOLEAN didWork = FALSE;
 
     while ((reason = InterlockedExchange((PLONG)&m_PendingWorks, 0)) != 0)
     {
+        didWork = TRUE;
         if ((reason & ISR_REASON_DISPLAY))
         {
             while (CtrlStagePopForDpc(&pvbuf, &len))
@@ -1550,7 +1552,10 @@ VOID VioGpuAdapter::DpcRoutine(VOID)
     }
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
-    m_DxgkInterface.DxgkCbNotifyDpc((HANDLE)m_DxgkInterface.DeviceHandle);
+    if (didWork)
+    {
+        m_DxgkInterface.DxgkCbNotifyDpc((HANDLE)m_DxgkInterface.DeviceHandle);
+    }
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
