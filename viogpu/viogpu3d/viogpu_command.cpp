@@ -183,16 +183,25 @@ void VioGpuCommand::Run()
                         submitCmd = new (NonPagedPoolNx) BYTE[cmdHdr->size];
                         if (!submitCmd)
                         {
-                            DbgPrint(TRACE_LEVEL_FATAL,
-                                     ("%s fence_id=%u OOM allocating submit buffer (size=%u) -> bugcheck\n",
+                            // Substitute a fenced NOP so the fence still
+                            // completes and DXGK does not deadlock waiting
+                            // on it. The pre-increments above already
+                            // account for this completion.
+                            DbgPrint(TRACE_LEVEL_ERROR,
+                                     ("%s fence_id=%u OOM allocating submit buffer (size=%u); substituting NOP\n",
                                       __FUNCTION__,
                                       m_FenceId,
                                       cmdHdr->size));
-                            KeBugCheckEx(0x000000E2,
-                                         static_cast<ULONG_PTR>('OIVg'),
-                                         static_cast<ULONG_PTR>(m_FenceId),
-                                         static_cast<ULONG_PTR>(cmdHdr->size),
-                                         reinterpret_cast<ULONG_PTR>(this));
+                            UINT nopRet = m_pAdapter->ctrlQueue.SubmitNop(VioGpuCommand::RunningCbDone, this, TRUE);
+                            if (nopRet)
+                            {
+                                DbgPrint(TRACE_LEVEL_ERROR,
+                                         ("%s fence_id=%u NOP fallback also failed ret=%u\n",
+                                          __FUNCTION__, m_FenceId, nopRet));
+                                InterlockedDecrement(&m_isrPendingPackets);
+                                InterlockedDecrement(&m_done);
+                            }
+                            break;
                         }
                         RtlCopyMemory(submitCmd, cmdBody, cmdHdr->size);
                     }
