@@ -34,6 +34,7 @@ VioGpuVidPN::VioGpuVidPN(VioGpuAdapter *adapter)
 
     m_SystemDisplaySourceId = D3DDDI_ID_UNINITIALIZED;
     KeInitializeSpinLock(&m_vsyncTimerLock);
+    KeInitializeSpinLock(&m_sourceLock);
     KeInitializeTimerEx(&m_vsyncNotifyTimer, SynchronizationTimer);
     KeInitializeDpc(&m_vsyncNotifyDpc, VioGpuVidPN::VsyncNotifyTimerDpc, this);
 
@@ -46,6 +47,12 @@ VioGpuVidPN::~VioGpuVidPN()
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
     DestroyFrameBufferObj(TRUE);
+
+    if (m_sourceRes)
+    {
+        m_sourceRes->Release();
+        m_sourceRes = NULL;
+    }
 
     delete[] m_ModeInfo;
     delete[] m_ModeNumbers;
@@ -2038,13 +2045,30 @@ void VioGpuVidPN::Flip()
 {
     if (InterlockedExchange(&m_shouldFlip, 0))
     {
-        if (m_sourceAddress.QuadPart != 0 && m_sourceRes != NULL)
+        VioGpuAllocation *res = NULL;
+        PHYSICAL_ADDRESS address;
+
+        KeAcquireSpinLockAtDpcLevel(&m_sourceLock);
+        res = m_sourceRes;
+        if (res)
         {
-            m_sourceRes->FlushToScreen(0);
+            res->AddRef();
+        }
+        address = m_sourceAddress;
+        KeReleaseSpinLockFromDpcLevel(&m_sourceLock);
+
+        if (address.QuadPart != 0 && res != NULL)
+        {
+            res->FlushToScreen(0);
         }
         else
         {
             m_pAdapter->ctrlQueue.SetScanout(0, 0, 0, 0, 0, 0);
+        }
+
+        if (res)
+        {
+            res->Release();
         }
     }
 }
@@ -2136,8 +2160,24 @@ void VioGpuVidPN::VsyncNotifyTimerDpc(KDPC *dpc, PVOID deferredContext, PVOID sy
 
 NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
 {
+    VioGpuAllocation *newRes = reinterpret_cast<VioGpuAllocation *>(pSetVidPnSourceAddress->hAllocation);
+    if (newRes)
+    {
+        newRes->AddRef();
+    }
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_sourceLock, &oldIrql);
+    VioGpuAllocation *oldRes = m_sourceRes;
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
-    m_sourceRes = reinterpret_cast<VioGpuAllocation *>(pSetVidPnSourceAddress->hAllocation);
+    m_sourceRes = newRes;
+    KeReleaseSpinLock(&m_sourceLock, oldIrql);
+
+    if (oldRes)
+    {
+        oldRes->Release();
+    }
+
     if (!QueueSourceAddress(m_sourceAddress))
     {
         LONG fullCount = InterlockedIncrement(&m_sourceQueueFullCount);

@@ -154,6 +154,7 @@ class VioGpuVidPN
 
     PHYSICAL_ADDRESS m_sourceAddress = {0};
     VioGpuAllocation *m_sourceRes = NULL;
+    KSPIN_LOCK m_sourceLock;
     volatile LONG m_shouldFlip = 0;
 
 
