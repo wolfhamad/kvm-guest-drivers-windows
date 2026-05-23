@@ -82,8 +82,18 @@ extern "C"
 
 #define VIOGPUTAG                          'OIVg'
 
-#define VIOGPU_LOG_ASSERTION0(Msg)         NT_ASSERT(FALSE)
-#define VIOGPU_LOG_ASSERTION1(Msg, Param1) NT_ASSERT(FALSE)
+#define VIOGPU_LOG_ASSERTION0(Msg)                                                                                     \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        DbgPrint(TRACE_LEVEL_FATAL, ("ASSERTION FAILED %s: %s\n", __FUNCTION__, Msg));                                 \
+        NT_ASSERT(FALSE);                                                                                              \
+    } while (0)
+#define VIOGPU_LOG_ASSERTION1(Msg, Param1)                                                                             \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        DbgPrint(TRACE_LEVEL_FATAL, ("ASSERTION FAILED %s: " Msg, __FUNCTION__, Param1));                              \
+        NT_ASSERT(FALSE);                                                                                              \
+    } while (0)
 #define VIOGPU_ASSERT(exp)                                                                                             \
     {                                                                                                                  \
         if (!(exp))                                                                                                    \
