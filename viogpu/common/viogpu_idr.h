@@ -42,5 +42,15 @@ class VioGpuIdr
     VOID Close(VOID);
 
   private:
-    LONG m_nextId;
+    // Bitmap-backed allocator with recycle. m_bitmap[i] tracks whether
+    // id (i + m_startId) is in use. The previous "bare monotonic
+    // counter, PutId no-ops" approach wrapped after ~2^31 ids and
+    // would then mint duplicates aliasing live host resources.
+    static const ULONG kMaxBitmapBits = 1u << 20;  // 1 Mi ids
+    KSPIN_LOCK m_lock;
+    ULONG m_startId;
+    ULONG m_bitmapBits;
+    PULONG m_bitmap;
+    RTL_BITMAP m_bitmapHdr;
+    ULONG m_lastIdx;
 };

@@ -36,7 +36,11 @@
 
 VioGpuIdr::VioGpuIdr()
 {
-    m_nextId = 0;
+    KeInitializeSpinLock(&m_lock);
+    m_startId = 0;
+    m_bitmapBits = 0;
+    m_bitmap = NULL;
+    m_lastIdx = 0;
 }
 
 VioGpuIdr::~VioGpuIdr()
@@ -47,28 +51,84 @@ VioGpuIdr::~VioGpuIdr()
 BOOLEAN VioGpuIdr::Init(_In_ ULONG start)
 {
     Close();
-    m_nextId = (LONG)start;
 
-    return true;
+    m_startId = start;
+    m_bitmapBits = kMaxBitmapBits;
+    ULONG sizeBytes = (m_bitmapBits + 31) / 32 * sizeof(ULONG);
+    m_bitmap = reinterpret_cast<PULONG>(new (NonPagedPoolNx) BYTE[sizeBytes]);
+    if (!m_bitmap)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("[%s] failed to allocate %u byte bitmap\n", __FUNCTION__, sizeBytes));
+        m_bitmapBits = 0;
+        return FALSE;
+    }
+    RtlZeroMemory(m_bitmap, sizeBytes);
+    RtlInitializeBitMap(&m_bitmapHdr, m_bitmap, m_bitmapBits);
+    m_lastIdx = 0;
+    return TRUE;
 }
 
 ULONG VioGpuIdr::GetId(VOID)
 {
-    ULONG id;
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_lock, &oldIrql);
 
-    id = (ULONG)InterlockedIncrement(&m_nextId) - 1;
+    ULONG idx = RtlFindClearBitsAndSet(&m_bitmapHdr, 1, m_lastIdx);
+    if (idx == 0xFFFFFFFF)
+    {
+        // Wrap and try from 0.
+        idx = RtlFindClearBitsAndSet(&m_bitmapHdr, 1, 0);
+    }
+    if (idx == 0xFFFFFFFF)
+    {
+        KeReleaseSpinLock(&m_lock, oldIrql);
+        DbgPrint(TRACE_LEVEL_FATAL, ("[%s] no free ids (bitmap exhausted)\n", __FUNCTION__));
+        return 0;
+    }
+    m_lastIdx = idx + 1;
+    if (m_lastIdx >= m_bitmapBits)
+    {
+        m_lastIdx = 0;
+    }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %d\n", __FUNCTION__, id));
+    KeReleaseSpinLock(&m_lock, oldIrql);
 
+    ULONG id = m_startId + idx;
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %u (idx=%u)\n", __FUNCTION__, id, idx));
     return id;
 }
 
 VOID VioGpuIdr::PutId(_In_ ULONG id)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %d\n", __FUNCTION__, id));
+    if (id < m_startId || (id - m_startId) >= m_bitmapBits)
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("[%s] out-of-range id=%u start=%u bits=%u\n",
+                                     __FUNCTION__, id, m_startId, m_bitmapBits));
+        return;
+    }
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_lock, &oldIrql);
+    ULONG idx = id - m_startId;
+    if (RtlCheckBit(&m_bitmapHdr, idx))
+    {
+        RtlClearBit(&m_bitmapHdr, idx);
+    }
+    else
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("[%s] double-put id=%u\n", __FUNCTION__, id));
+    }
+    KeReleaseSpinLock(&m_lock, oldIrql);
+
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %u\n", __FUNCTION__, id));
 }
 
 VOID VioGpuIdr::Close(VOID)
 {
-
+    if (m_bitmap)
+    {
+        delete[] reinterpret_cast<PBYTE>(m_bitmap);
+        m_bitmap = NULL;
+    }
+    m_bitmapBits = 0;
+    m_lastIdx = 0;
 }
