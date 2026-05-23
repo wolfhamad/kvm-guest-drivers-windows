@@ -1014,14 +1014,17 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
 
                 PUINT8 payload = (PUINT8)(pVioGpuEscape + 1);
                 VIOGPU_SUBMIT_CMD_REQ *req = (VIOGPU_SUBMIT_CMD_REQ *)payload;
-                const UINT needed = (UINT)(sizeof(*req) + req->CmdSize);
-                if (pVioGpuEscape->DataLength < needed)
+                // Cap CmdSize at 1 MiB and compare against the remaining
+                // payload bytes via subtraction, never an addition that
+                // could wrap in 32-bit UINT.
+                if (req->CmdSize > (1u << 20) ||
+                    req->CmdSize > pVioGpuEscape->DataLength - sizeof(*req))
                 {
                     DbgPrint(TRACE_LEVEL_ERROR,
-                             ("%s escape payload too small %d, need %d\n",
+                             ("%s escape payload too small or oversized cmd_size=%u available=%u\n",
                               __FUNCTION__,
-                              pVioGpuEscape->DataLength,
-                              needed));
+                              req->CmdSize,
+                              pVioGpuEscape->DataLength - (UINT)sizeof(*req)));
                     return STATUS_INVALID_BUFFER_SIZE;
                 }
 
