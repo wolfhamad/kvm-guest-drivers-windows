@@ -114,6 +114,23 @@ void VioGpuShmemAllocator::InsertFreeBlockLocked(FreeBlock *block)
     while (entry != &m_free_list)
     {
         FreeBlock *cur = CONTAINING_RECORD(entry, FreeBlock, entry);
+        // Detect double-Free: an incoming block that overlaps an
+        // existing free block would let a subsequent Allocate hand
+        // the same range to two callers. Drop the duplicate instead
+        // of corrupting the free list.
+        ULONGLONG cur_end = cur->offset + cur->size;
+        ULONGLONG blk_end = block->offset + block->size;
+        if (block->offset < cur_end && cur->offset < blk_end)
+        {
+            DbgPrint(TRACE_LEVEL_ERROR,
+                     ("%s overlapping free detected blk=[0x%llx,0x%llx) cur=[0x%llx,0x%llx)\n",
+                      __FUNCTION__,
+                      block->offset, blk_end,
+                      cur->offset, cur_end));
+            ASSERT(FALSE);
+            FreeBlockNode(block);
+            return;
+        }
         if (block->offset < cur->offset)
         {
             break;
