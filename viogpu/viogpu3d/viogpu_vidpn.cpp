@@ -11,8 +11,28 @@
 #include "edid.h"
 #include "trace.h"
 
-static const LONGLONG kVsyncPeriod100ns = 166666LL; // 60 Hz
+static const LONGLONG kVsyncPeriodFallback100ns = 166666LL; // 60 Hz
 static const LONGLONG kVsyncMaxLead100ns = 333333LL;
+
+// Convert a D3DDDI_RATIONAL refresh rate into a 100ns timer period.
+// Falls back to 60 Hz for missing or out-of-range inputs so callers
+// always receive a usable value.
+static LONGLONG VsyncPeriodFromRefresh(D3DDDI_RATIONAL refresh)
+{
+    if (refresh.Denominator == 0 || refresh.Numerator == 0)
+    {
+        return kVsyncPeriodFallback100ns;
+    }
+    // 10,000,000 100ns ticks per second; period = denom / numer.
+    LONGLONG num = 10000000LL * (LONGLONG)refresh.Denominator;
+    LONGLONG den = (LONGLONG)refresh.Numerator;
+    LONGLONG period = (num + den / 2) / den;
+    if (period < 10000LL || period > 1000000LL) // clamp 1000Hz .. 10Hz
+    {
+        return kVsyncPeriodFallback100ns;
+    }
+    return period;
+}
 
 PAGED_CODE_SEG_BEGIN
 
@@ -2013,11 +2033,14 @@ VOID VioGpuVidPN::StartVsyncTimer(void)
         m_timerRes = ExSetTimerResolution(10000, TRUE);
     }
 
+    // Vsync period tracks the active mode's refresh rate.
+    LONGLONG period = VsyncPeriodFromRefresh(GetActiveRefreshRate());
+
     LARGE_INTEGER now;
     LARGE_INTEGER due;
     KeQuerySystemTime(&now);
-    next_vsync_time.QuadPart = now.QuadPart + kVsyncPeriod100ns;
-    due.QuadPart = -kVsyncPeriod100ns;
+    next_vsync_time.QuadPart = now.QuadPart + period;
+    due.QuadPart = -period;
 
     KIRQL oldIrql;
     KeAcquireSpinLock(&m_vsyncTimerLock, &oldIrql);
@@ -2129,14 +2152,16 @@ void VioGpuVidPN::VsyncNotifyTimerDpc(KDPC *dpc, PVOID deferredContext, PVOID sy
     LARGE_INTEGER next;
     KeQuerySystemTime(&now);
 
-    next.QuadPart = vidpn->next_vsync_time.QuadPart + kVsyncPeriod100ns;
+    LONGLONG period = VsyncPeriodFromRefresh(vidpn->GetActiveRefreshRate());
+
+    next.QuadPart = vidpn->next_vsync_time.QuadPart + period;
     if (next.QuadPart < now.QuadPart)
     {
-        next.QuadPart = now.QuadPart + kVsyncPeriod100ns;
+        next.QuadPart = now.QuadPart + period;
     }
     else if (next.QuadPart > (now.QuadPart + kVsyncMaxLead100ns))
     {
-        next.QuadPart = now.QuadPart + kVsyncPeriod100ns;
+        next.QuadPart = now.QuadPart + period;
     }
     vidpn->next_vsync_time = next;
 
@@ -2144,7 +2169,7 @@ void VioGpuVidPN::VsyncNotifyTimerDpc(KDPC *dpc, PVOID deferredContext, PVOID sy
     due.QuadPart = next.QuadPart - now.QuadPart;
     if (due.QuadPart <= 0 || due.QuadPart > kVsyncMaxLead100ns)
     {
-        due.QuadPart = kVsyncPeriod100ns;
+        due.QuadPart = period;
     }
     due.QuadPart = -due.QuadPart;
 
