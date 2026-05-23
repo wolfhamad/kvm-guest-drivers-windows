@@ -330,11 +330,16 @@ BOOLEAN VioGpuCommand::OnPacketCompletedFromIsr(UINT *fenceId, UINT *nodeOrdinal
 
     if (pending < 0)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
-                 ("%s cmd=%p WARNING m_isrPendingPackets underflow fence_id=%u\n",
+        // Underflow indicates double-completion: the pre-increment
+        // count in Run() does not match the number of submit results
+        // returned. Trip the assert in DBG builds; retail clamps to
+        // zero and continues.
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s cmd=%p m_isrPendingPackets underflow fence_id=%u\n",
                   __FUNCTION__,
                   this,
                   m_FenceId));
+        ASSERT(pending >= 0);
         InterlockedExchange(&m_isrPendingPackets, 0);
         return FALSE;
     }
