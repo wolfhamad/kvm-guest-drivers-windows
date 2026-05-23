@@ -1513,13 +1513,33 @@ UINT CtrlQueue::Flush()
                 continue;
             }
 
-            ExInterlockedInsertHeadList(&m_CtrlQueueList, &queuedBuf->ctrl_queue_entry, &m_CtrlQueueSpinLock);
-            InterlockedExchange(&m_CtrlQueueFlushInProgress, 0);
-
+            // Differentiate transient (ring full = positive non-zero
+            // from virtqueue_add_buf) from permanent (validation/SG
+            // build/closed-queue = (UINT)-1) failures. Transient
+            // failures push the buffer back to the head for retry on
+            // the next Flush. Permanent failures cannot be retried;
+            // fire the buffer's complete_cb so any caller waiting on
+            // a wait-context unblocks, then release the buffer and
+            // keep draining so a single faulted buffer doesn't stall
+            // every other pending submit (and its fence) behind it.
             if (ret == (UINT)-1)
             {
-                DbgPrint(TRACE_LEVEL_ERROR, ("<--> %s submit failed while flushing pending ctrl queue\n", __FUNCTION__));
+                DbgPrint(TRACE_LEVEL_ERROR,
+                         ("<--> %s permanent submit failure; faulting vbuf=%p\n",
+                          __FUNCTION__, queuedBuf));
+                if (queuedBuf->complete_cb)
+                {
+                    queuedBuf->complete_cb(queuedBuf->complete_ctx);
+                }
+                ReleaseBuffer(queuedBuf);
+                continue;
             }
+
+            ExInterlockedInsertHeadList(&m_CtrlQueueList, &queuedBuf->ctrl_queue_entry, &m_CtrlQueueSpinLock);
+            InterlockedExchange(&m_CtrlQueueFlushInProgress, 0);
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("<--> %s transient submit failure ret=%u; will retry\n",
+                      __FUNCTION__, ret));
             return ret;
         }
 
