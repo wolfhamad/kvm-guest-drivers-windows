@@ -146,6 +146,7 @@ class VioGpuAllocation
 
     KEVENT m_busyNotification;
     volatile LONG m_busy;
+    KSPIN_LOCK m_busyLock;
 
     volatile LONG m_refCount;
 };

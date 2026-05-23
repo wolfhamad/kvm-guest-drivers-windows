@@ -120,6 +120,7 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
 
     KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
     m_busy = 0;
+    KeInitializeSpinLock(&m_busyLock);
 
     m_refCount = 1;
 
@@ -325,20 +326,32 @@ void VioGpuAllocation::MarkBusy()
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s res_id=%d\n", __FUNCTION__, m_Id));
 
+    // Serialize counter + event mutation under m_busyLock. Without it,
+    // an interleaving where UnmarkBusy decrements to 0 and SetEvent's,
+    // then MarkBusy increments and ClearEvent's, would leave the
+    // counter > 0 with the event signalled -- causing EscapeResourceBusy
+    // to busy-spin waking immediately on every check.
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_busyLock, &oldIrql);
     InterlockedIncrement(&m_busy);
     KeClearEvent(&m_busyNotification);
+    KeReleaseSpinLock(&m_busyLock, oldIrql);
 }
 
 void VioGpuAllocation::UnmarkBusy()
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s res_id=%d\n", __FUNCTION__, m_Id));
 
-    if (InterlockedDecrement(&m_busy) == 0)
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&m_busyLock, &oldIrql);
+    LONG remaining = InterlockedDecrement(&m_busy);
+    if (remaining == 0)
     {
         KeSetEvent(&m_busyNotification, IO_NO_INCREMENT, FALSE);
     }
+    KeReleaseSpinLock(&m_busyLock, oldIrql);
 
-    ASSERT(m_busy >= 0);
+    ASSERT(remaining >= 0);
 }
 
 void VioGpuAllocation::FlushToScreen(UINT scan_id)
