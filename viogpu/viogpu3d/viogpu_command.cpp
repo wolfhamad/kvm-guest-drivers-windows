@@ -130,7 +130,7 @@ void VioGpuCommand::Run()
         UINT ret = m_pAdapter->ctrlQueue.SubmitNop(VioGpuCommand::RunningCbDone, this, TRUE /* fenced */);
         if (ret)
         {
-            DbgPrint(TRACE_LEVEL_FATAL,
+            DbgPrint(TRACE_LEVEL_ERROR,
                      ("%s cmd=%p failed to queue empty submit fence=%u node=%u engine=%u ret=%u\n",
                       __FUNCTION__,
                       this,
@@ -138,8 +138,8 @@ void VioGpuCommand::Run()
                       m_NodeOrdinal,
                       m_EngineOrdinal,
                       ret));
-            InterlockedExchange(&m_isrPendingPackets, 0);
-            VioGpuCommand::VioGpuCommandDone();
+            InterlockedDecrement(&m_isrPendingPackets);
+            InterlockedDecrement(&m_done);
         }
 
         VioGpuCommand::VioGpuCommandDone();
