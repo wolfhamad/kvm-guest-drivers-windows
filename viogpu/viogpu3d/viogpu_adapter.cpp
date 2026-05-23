@@ -2383,6 +2383,21 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
 
             while ((pvbuf = ctrlQueue.DequeueBufferFromIsr(&len)) != NULL)
             {
+                // Host responses with type >= VIRTIO_GPU_RESP_ERR_UNSPEC
+                // indicate the command failed on the host. Report a
+                // DMA fault so UMD / DXGK see the error and the
+                // scheduler can react; reporting DMA_COMPLETED would
+                // silently swallow host-side failure.
+                BOOLEAN faulted = FALSE;
+                if (pvbuf->resp_buf)
+                {
+                    PGPU_CTRL_HDR resp = (PGPU_CTRL_HDR)pvbuf->resp_buf;
+                    if (resp->type >= VIRTIO_GPU_RESP_ERR_UNSPEC)
+                    {
+                        faulted = TRUE;
+                    }
+                }
+
                 if (pvbuf->complete_cb == VioGpuCommand::RunningCbDone && pvbuf->complete_ctx != NULL)
                 {
                     VioGpuCommand *cmd = reinterpret_cast<VioGpuCommand *>(pvbuf->complete_ctx);
@@ -2396,10 +2411,21 @@ BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
                         if (ShouldNotifyDmaFence(fenceId, nodeOrdinal, engineOrdinal, ctxId, ownerPid))
                         {
                             DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt = {};
-                            interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
-                            interrupt.DmaCompleted.SubmissionFenceId = fenceId;
-                            interrupt.DmaCompleted.NodeOrdinal = nodeOrdinal;
-                            interrupt.DmaCompleted.EngineOrdinal = engineOrdinal;
+                            if (faulted)
+                            {
+                                interrupt.InterruptType = DXGK_INTERRUPT_DMA_FAULTED;
+                                interrupt.DmaFaulted.FaultedFenceId = fenceId;
+                                interrupt.DmaFaulted.Status = STATUS_GRAPHICS_DRIVER_MISMATCH;
+                                interrupt.DmaFaulted.NodeOrdinal = nodeOrdinal;
+                                interrupt.DmaFaulted.EngineOrdinal = engineOrdinal;
+                            }
+                            else
+                            {
+                                interrupt.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
+                                interrupt.DmaCompleted.SubmissionFenceId = fenceId;
+                                interrupt.DmaCompleted.NodeOrdinal = nodeOrdinal;
+                                interrupt.DmaCompleted.EngineOrdinal = engineOrdinal;
+                            }
                             m_DxgkInterface.DxgkCbNotifyInterrupt(m_DxgkInterface.DeviceHandle, &interrupt);
                         }
                         RecordDmaCompletionForPreemptionFromIsr(fenceId, nodeOrdinal, engineOrdinal, ctxId, ownerPid);
