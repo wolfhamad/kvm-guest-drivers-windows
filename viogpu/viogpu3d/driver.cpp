@@ -561,10 +561,27 @@ VioGpu3DBuildPagingBuffer(_In_ CONST HANDLE hAdapter, _In_ DXGKARG_BUILDPAGINGBU
                 DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s (unmap aperture segment)\n", __FUNCTION__));
                 return Status;
             }
+        case DXGK_OPERATION_DISCARD_CONTENT:
+            {
+                // virtio-gpu needs no explicit discard signal; report
+                // success so DXGK's eviction path can proceed.
+                DbgPrint(TRACE_LEVEL_VERBOSE,
+                         ("<--- %s (discard content)\n", __FUNCTION__));
+                return STATUS_SUCCESS;
+            }
+        case DXGK_OPERATION_FILL:
+            {
+                // DXGK uses FILL as a paging-time clear. Without a real
+                // implementation, report success: the host sees
+                // zero-initialised pages on the next attach anyway.
+                DbgPrint(TRACE_LEVEL_VERBOSE,
+                         ("<--- %s (fill, no-op)\n", __FUNCTION__));
+                return STATUS_SUCCESS;
+            }
         default:
             {
-                DbgPrint(TRACE_LEVEL_ERROR,
-                         ("<--- %s (unknown operation %d)\n", __FUNCTION__, pBuildPagingBuffer->Operation));
+                DbgPrint(TRACE_LEVEL_WARNING,
+                         ("<--- %s unhandled operation=%d\n", __FUNCTION__, pBuildPagingBuffer->Operation));
                 return STATUS_NOT_SUPPORTED;
             }
     };
