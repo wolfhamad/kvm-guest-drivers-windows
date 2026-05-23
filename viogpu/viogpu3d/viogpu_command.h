@@ -76,6 +76,7 @@ class VioGpuCommand
     VioGpuCommand **m_pPrivateDataSlot = NULL;
     BOOLEAN m_expectedEmptySubmit = FALSE;
     BOOLEAN m_submitPaging = FALSE;
+    BOOLEAN m_submitNullRendering = FALSE;
     UINT m_submitFlagsValue = 0;
     LONG m_dmaNotified = 0;
 

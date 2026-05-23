@@ -48,16 +48,22 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 #endif
     m_submitFlagsValue = pSubmitCommand->Flags.Value;
     m_submitPaging = pSubmitCommand->Flags.Paging ? TRUE : FALSE;
-    // Submissions that arrive with an empty DMA range are fence-only:
+    // Track NullRendering for Run() to skip the host submission below.
+    m_submitNullRendering = pSubmitCommand->Flags.NullRendering ? TRUE : FALSE;
+    // Submissions that arrive with an empty DMA range -- or that
+    // NullRendering converts into one -- are fence-only:
     //   - Paging: paging buffers can be empty (fence-only sync points).
     //   - ContextSwitch: documented as zero-length per DXGK_SUBMITCOMMANDFLAGS.
-    //   - Flip: viogpu3d's DxgkDdiPresent emits no DMA for the flip path,
-    //     so DXGK passes the flip through as a fence-only submission.
+    //   - Flip: viogpu3d's DxgkDdiPresent emits no DMA on the flip path.
+    //   - NullRendering: DXGK signals "simulate insertion only" so we
+    //     drop the body and just complete the fence.
     m_expectedEmptySubmit = (pSubmitCommand->Flags.Paging != 0 ||
                              pSubmitCommand->Flags.ContextSwitch != 0 ||
-                             pSubmitCommand->Flags.Flip != 0) &&
+                             pSubmitCommand->Flags.Flip != 0 ||
+                             pSubmitCommand->Flags.NullRendering != 0) &&
                             (pSubmitCommand->DmaBufferSubmissionEndOffset <=
-                             pSubmitCommand->DmaBufferSubmissionStartOffset);
+                             pSubmitCommand->DmaBufferSubmissionStartOffset ||
+                             pSubmitCommand->Flags.NullRendering != 0);
     if (m_pDmaBuffer)
     {
         m_pCommand = (char *)m_pDmaBuffer + pSubmitCommand->DmaBufferSubmissionStartOffset;
@@ -149,6 +155,29 @@ void VioGpuCommand::Run()
             InterlockedDecrement(&m_done);
         }
 
+        VioGpuCommand::VioGpuCommandDone();
+        return;
+    }
+
+    if (m_submitNullRendering)
+    {
+        // DXGK_SUBMITCOMMANDFLAGS.NullRendering: simulate insertion of
+        // the DMA buffer but do not execute the body. Substitute a
+        // fenced NOP so the fence still completes; the body is dropped.
+        DbgPrint(TRACE_LEVEL_VERBOSE,
+                 ("%s cmd=%p NullRendering fence=%u skip body\n",
+                  __FUNCTION__, this, m_FenceId));
+        InterlockedIncrement(&m_isrPendingPackets);
+        InterlockedIncrement(&m_done);
+        UINT ret = m_pAdapter->ctrlQueue.SubmitNop(VioGpuCommand::RunningCbDone, this, TRUE);
+        if (ret)
+        {
+            DbgPrint(TRACE_LEVEL_ERROR,
+                     ("%s cmd=%p NullRendering NOP submit failed ret=%u\n",
+                      __FUNCTION__, this, ret));
+            InterlockedDecrement(&m_isrPendingPackets);
+            InterlockedDecrement(&m_done);
+        }
         VioGpuCommand::VioGpuCommandDone();
         return;
     }
