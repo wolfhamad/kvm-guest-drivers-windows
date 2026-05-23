@@ -1273,10 +1273,15 @@ void VioGpuAdapter::NotifyPendingPreemptionIfDrained(UINT nodeOrdinal,
 
 NTSTATUS VioGpuAdapter::PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
 {
+    // Per the DxgkDdiPreemptCommand DDI contract, any error return from
+    // this function causes a system bugcheck (0x119 with arg1=2). For
+    // unexpected input, log and notify the scheduler that preemption is
+    // already done rather than returning an error.
     if (!pPreemptCommand)
     {
         InterlockedIncrement(&m_preemptionInvalidCount);
-        return STATUS_INVALID_PARAMETER;
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s null pPreemptCommand\n", __FUNCTION__));
+        return STATUS_SUCCESS;
     }
 
     UINT nodeOrdinal = pPreemptCommand->NodeOrdinal;
@@ -1287,14 +1292,24 @@ NTSTATUS VioGpuAdapter::PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreem
     {
         LONG invalidCount = InterlockedIncrement(&m_preemptionInvalidCount);
         DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s invalid_preemption[%ld] preempt_fence=%u node=%u engine=%u flags=0x%x\n",
+                 ("%s out-of-range preemption[%ld] preempt_fence=%u node=%u engine=%u flags=0x%x; treating as already-done\n",
                   __FUNCTION__,
                   invalidCount,
                   preemptionFenceId,
                   nodeOrdinal,
                   engineOrdinal,
                   pPreemptCommand->Flags.Value));
-        return STATUS_INVALID_PARAMETER;
+        // We don't track this node/engine, so we have no last-completed
+        // fence to report. Use preemptionFenceId as both ends — the
+        // scheduler will treat the preemption as having completed at
+        // exactly the requested point.
+        NotifyDmaPreempted(preemptionFenceId,
+                           preemptionFenceId,
+                           nodeOrdinal,
+                           engineOrdinal,
+                           FALSE,
+                           "preempt_out_of_range");
+        return STATUS_SUCCESS;
     }
 
     LONG requestCount = InterlockedIncrement(&m_preemptionRequestCount);
