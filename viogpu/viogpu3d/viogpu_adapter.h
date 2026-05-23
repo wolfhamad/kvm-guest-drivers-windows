@@ -126,6 +126,11 @@ class VioGpuAdapter : IVioGpuPCI, public IVioGpuQueueSync
     volatile LONG m_outOfOrderFenceDropCount;
     CAPSET_INFO m_capsetInfos[VIRTIO_GPU_MAX_CAPSET_ID + 1];
 
+    // Per-scanout last-reported connect state, indexed by ChildUid.
+    // UpdateChildStatus dedupes against this so DXGK only sees real
+    // connected <-> disconnected transitions.
+    BOOLEAN m_scanoutConnected[MAX_CHILDREN] = {FALSE};
+
   public:
     VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject);
     ~VioGpuAdapter(void);
