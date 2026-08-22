@@ -12,6 +12,29 @@
 #pragma code_seg(push)
 #pragma code_seg()
 
+__declspec(noreturn) static void BugCheckDmaQueueSubmitFailure(PVOID command,
+                                                               UINT fenceId,
+                                                               UINT nodeOrdinal,
+                                                               UINT engineOrdinal,
+                                                               UINT packetType,
+                                                               UINT ret)
+{
+    DbgPrint(TRACE_LEVEL_FATAL,
+             ("%s cmd=%p permanent ctrlq submit failure fence=%u node=%u engine=%u packet_type=%u ret=0x%x -> bugcheck\n",
+              __FUNCTION__,
+              command,
+              fenceId,
+              nodeOrdinal,
+              engineOrdinal,
+              packetType,
+              ret));
+    KeBugCheckEx(0x000000E2,
+                 static_cast<ULONG_PTR>('QIVg'),
+                 reinterpret_cast<ULONG_PTR>(command),
+                 static_cast<ULONG_PTR>(fenceId),
+                 static_cast<ULONG_PTR>(packetType));
+}
+
 VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
@@ -240,16 +263,12 @@ void VioGpuCommand::Run()
         UINT ret = m_pAdapter->ctrlQueue.SubmitNop(VioGpuCommand::RunningCbDone, this, TRUE /* fenced */);
         if (ret)
         {
-            DbgPrint(TRACE_LEVEL_FATAL,
-                     ("%s cmd=%p failed to queue empty submit fence=%u node=%u engine=%u ret=%u\n",
-                      __FUNCTION__,
-                      this,
-                      m_FenceId,
-                      m_NodeOrdinal,
-                      m_EngineOrdinal,
-                      ret));
-            InterlockedExchange(&m_isrPendingPackets, 0);
-            VioGpuCommand::VioGpuCommandDone();
+            BugCheckDmaQueueSubmitFailure(this,
+                                           m_FenceId,
+                                           m_NodeOrdinal,
+                                           m_EngineOrdinal,
+                                           VIOGPU_CMD_NOP,
+                                           ret);
         }
 
         VioGpuCommand::VioGpuCommandDone();
@@ -271,16 +290,12 @@ void VioGpuCommand::Run()
         UINT ret = m_pAdapter->ctrlQueue.SubmitNop(VioGpuCommand::RunningCbDone, this, TRUE /* fenced */);
         if (ret)
         {
-            DbgPrint(TRACE_LEVEL_FATAL,
-                     ("%s cmd=%p failed to queue invalid-stream completion fence=%u node=%u engine=%u ret=%u\n",
-                      __FUNCTION__,
-                      this,
-                      m_FenceId,
-                      m_NodeOrdinal,
-                      m_EngineOrdinal,
-                      ret));
-            InterlockedExchange(&m_isrPendingPackets, 0);
-            VioGpuCommand::VioGpuCommandDone();
+            BugCheckDmaQueueSubmitFailure(this,
+                                           m_FenceId,
+                                           m_NodeOrdinal,
+                                           m_EngineOrdinal,
+                                           VIOGPU_CMD_NOP,
+                                           ret);
         }
 
         VioGpuCommand::VioGpuCommandDone();
@@ -323,13 +338,12 @@ void VioGpuCommand::Run()
                                                                 TRUE /* fenced */);
                     if (ret)
                     {
-                        DbgPrint(TRACE_LEVEL_WARNING,
-                                 ("%s fence_id=%u failed nop submit ret=%u\n",
-                                  __FUNCTION__,
-                                  m_FenceId,
-                                  ret));
-                        InterlockedDecrement(&m_isrPendingPackets);
-                        VioGpuCommand::VioGpuCommandDone();
+                        BugCheckDmaQueueSubmitFailure(this,
+                                                       m_FenceId,
+                                                       m_NodeOrdinal,
+                                                       m_EngineOrdinal,
+                                                       cmdHdr->type,
+                                                       ret);
                     }
                     break;
                 }
@@ -358,11 +372,20 @@ void VioGpuCommand::Run()
                         RtlCopyMemory(submitCmd, cmdBody, cmdHdr->size);
                     }
 
-                    m_pAdapter->ctrlQueue.SubmitCommand(submitCmd,
-                                                        cmdHdr->size,
-                                                        m_pContext->GetId(),
-                                                        VioGpuCommand::RunningCbDone,
-                                                        this);
+                    UINT ret = m_pAdapter->ctrlQueue.SubmitCommand(submitCmd,
+                                                                    cmdHdr->size,
+                                                                    m_pContext->GetId(),
+                                                                    VioGpuCommand::RunningCbDone,
+                                                                    this);
+                    if (ret)
+                    {
+                        BugCheckDmaQueueSubmitFailure(this,
+                                                       m_FenceId,
+                                                       m_NodeOrdinal,
+                                                       m_EngineOrdinal,
+                                                       cmdHdr->type,
+                                                       ret);
+                    }
                     break;
                 }
 
@@ -373,11 +396,20 @@ void VioGpuCommand::Run()
 
                     VIOGPU_TRANSFER_CMD *transferCmd = (VIOGPU_TRANSFER_CMD *)cmdBody;
 
-                    m_pAdapter->ctrlQueue.TransferHostCmd(cmdHdr->type == VIOGPU_CMD_TRANSFER_TO_HOST,
-                                                          m_pContext->GetId(),
-                                                          transferCmd,
-                                                          VioGpuCommand::RunningCbDone,
-                                                          this);
+                    UINT ret = m_pAdapter->ctrlQueue.TransferHostCmd(cmdHdr->type == VIOGPU_CMD_TRANSFER_TO_HOST,
+                                                                      m_pContext->GetId(),
+                                                                      transferCmd,
+                                                                      VioGpuCommand::RunningCbDone,
+                                                                      this);
+                    if (ret)
+                    {
+                        BugCheckDmaQueueSubmitFailure(this,
+                                                       m_FenceId,
+                                                       m_NodeOrdinal,
+                                                       m_EngineOrdinal,
+                                                       cmdHdr->type,
+                                                       ret);
+                    }
                     break;
                 }
 
@@ -412,19 +444,12 @@ void VioGpuCommand::Run()
                                                               this);
                     if (ret)
                     {
-                        DbgPrint(TRACE_LEVEL_WARNING,
-                                 ("%s fence_id=%u failed present flip scan=%u res=%u rect=%ux%u+%u+%u ret=%u\n",
-                                  __FUNCTION__,
-                                  m_FenceId,
-                                  flipCmd->scan_id,
-                                  flipCmd->res_id,
-                                  flipCmd->width,
-                                  flipCmd->height,
-                                  flipCmd->x,
-                                  flipCmd->y,
-                                  ret));
-                        InterlockedDecrement(&m_isrPendingPackets);
-                        VioGpuCommand::VioGpuCommandDone();
+                        BugCheckDmaQueueSubmitFailure(this,
+                                                       m_FenceId,
+                                                       m_NodeOrdinal,
+                                                       m_EngineOrdinal,
+                                                       cmdHdr->type,
+                                                       ret);
                     }
                     break;
                 }

@@ -44,6 +44,27 @@ static BOOLEAN BuildSGElement(VirtIOBufferDescriptor *sg, PVOID buf, ULONG size)
     return FALSE;
 }
 
+__declspec(noreturn) static void BugCheckCtrlQueueSubmitFailure(PGPU_VBUFFER buf, UINT ret)
+{
+    UINT commandType = 0;
+    if (buf && buf->buf && buf->size >= sizeof(GPU_CTRL_HDR) && MmIsAddressValid(buf->buf))
+    {
+        commandType = reinterpret_cast<PGPU_CTRL_HDR>(buf->buf)->type;
+    }
+
+    DbgPrint(TRACE_LEVEL_FATAL,
+             ("<--> %s permanent ctrlq submit failure buf=%p command_type=0x%x ret=0x%x -> bugcheck\n",
+              __FUNCTION__,
+              buf,
+              commandType,
+              ret));
+    KeBugCheckEx(0x000000E2,
+                 static_cast<ULONG_PTR>('QIVg'),
+                 reinterpret_cast<ULONG_PTR>(buf),
+                 static_cast<ULONG_PTR>(commandType),
+                 static_cast<ULONG_PTR>(ret));
+}
+
 static void NotifyEventCompleteCB(void *ctx)
 {
     KeSetEvent((PKEVENT)ctx, IO_NO_INCREMENT, FALSE);
@@ -879,13 +900,22 @@ void CtrlQueue::CtxResource(bool attach, UINT ctx_id, UINT res_id)
 
 PAGED_CODE_SEG_END
 
-void CtrlQueue::SubmitCommand(void *cmdbuf, ULONG size, ULONG ctx_id, void (*complete_cb)(void *), void *complete_ctx)
+UINT CtrlQueue::SubmitCommand(void *cmdbuf,
+                              ULONG size,
+                              ULONG ctx_id,
+                              void (*complete_cb)(void *),
+                              void *complete_ctx)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
     PGPU_CMD_SUBMIT cmd;
     PGPU_VBUFFER vbuf;
     cmd = (PGPU_CMD_SUBMIT)AllocCmd(&vbuf, sizeof(*cmd));
+    if (!cmd || !vbuf)
+    {
+        delete[] reinterpret_cast<PBYTE>(cmdbuf);
+        return (UINT)-1;
+    }
     RtlZeroMemory(cmd, sizeof(*cmd));
 
     cmd->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
@@ -899,9 +929,21 @@ void CtrlQueue::SubmitCommand(void *cmdbuf, ULONG size, ULONG ctx_id, void (*com
     vbuf->complete_cb = complete_cb;
     vbuf->complete_ctx = complete_ctx;
 
-    QueueBufferFenced(vbuf);
+    UINT ret = QueueBufferFenced(vbuf);
+    if (ret)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s failed to queue submit ctx_id=%lu size=%lu ret=%u\n",
+                  __FUNCTION__,
+                  ctx_id,
+                  size,
+                  ret));
+        ReleaseBuffer(vbuf);
+        return ret;
+    }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    return ret;
 }
 
 UINT CtrlQueue::SubmitNop(void (*complete_cb)(void *), void *complete_ctx, BOOLEAN fenced)
@@ -929,7 +971,7 @@ UINT CtrlQueue::SubmitNop(void (*complete_cb)(void *), void *complete_ctx, BOOLE
 }
 
 
-void CtrlQueue::TransferHostCmd(bool to_host,
+UINT CtrlQueue::TransferHostCmd(bool to_host,
                                 ULONG ctx_id,
                                 VIOGPU_TRANSFER_CMD *options,
                                 void (*complete_cb)(void *),
@@ -940,6 +982,10 @@ void CtrlQueue::TransferHostCmd(bool to_host,
     PGPU_CMD_TRANSFER_HOST_3D cmd;
     PGPU_VBUFFER vbuf;
     cmd = (PGPU_CMD_TRANSFER_HOST_3D)AllocCmd(&vbuf, sizeof(*cmd));
+    if (!cmd || !vbuf)
+    {
+        return (UINT)-1;
+    }
     RtlZeroMemory(cmd, sizeof(*cmd));
 
     cmd->hdr.type = to_host ? VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D : VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
@@ -963,9 +1009,22 @@ void CtrlQueue::TransferHostCmd(bool to_host,
     vbuf->complete_cb = complete_cb;
     vbuf->complete_ctx = complete_ctx;
 
-    QueueBufferFenced(vbuf);
+    UINT ret = QueueBufferFenced(vbuf);
+    if (ret)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s failed to queue %s ctx_id=%lu res_id=%u ret=%u\n",
+                  __FUNCTION__,
+                  to_host ? "transfer_to_host" : "transfer_from_host",
+                  ctx_id,
+                  options->res_id,
+                  ret));
+        ReleaseBuffer(vbuf);
+        return ret;
+    }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    return ret;
 }
 
 void CtrlQueue::DestroyResource(UINT res_id)
@@ -1054,7 +1113,7 @@ void CtrlQueue::SetScanout(UINT scan_id, UINT res_id, UINT width, UINT height, U
     UINT ret = QueueBuffer(vbuf);
     if (ret)
     {
-        DbgPrint(TRACE_LEVEL_WARNING,
+        DbgPrint(TRACE_LEVEL_FATAL,
                  ("%s failed to queue set_scanout scan=%u res=%u rect=%ux%u+%u+%u ret=%u\n",
                   __FUNCTION__,
                   scan_id,
@@ -1064,13 +1123,14 @@ void CtrlQueue::SetScanout(UINT scan_id, UINT res_id, UINT width, UINT height, U
                   x,
                   y,
                   ret));
-        ReleaseBuffer(vbuf);
+        BugCheckCtrlQueueSubmitFailure(vbuf, ret);
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
 #define SGLIST_SIZE 256
+static const UINT VIRTQUEUE_NO_SPACE = static_cast<UINT>(-28); // -ENOSPC
 
 static BOOLEAN ValidateCtrlQueueBuffer(PGPU_VBUFFER buf)
 {
@@ -1282,13 +1342,30 @@ UINT CtrlQueue::Flush()
                 continue;
             }
 
+            if (ret != VIRTQUEUE_NO_SPACE)
+            {
+                // Only descriptor exhaustion is retryable. SG construction,
+                // synchronized execution, and unexpected virtqueue failures are
+                // fatal invariants. QueueBuffer() already transferred ownership,
+                // so neither completion nor recycling is truthful here.
+                BugCheckCtrlQueueSubmitFailure(queuedBuf, ret);
+            }
+
+            // Transient: the control virtqueue is out of descriptors (-ENOSPC).
+            // This is NOT a failure of this buffer. It stays staged (re-inserted
+            // at the head so submission order is preserved) and is drained by a
+            // later Flush() -- e.g. from the completion DPC once the host returns
+            // descriptors. The caller must never observe this as its buffer
+            // failing, or it will release a buffer the queue still owns and the
+            // retry will resubmit/free it a second time (data_buf UAF -> host
+            // reads a stale/other submit payload).
+            LONG requeues = InterlockedIncrement(&m_CtrlQueueFullRequeues);
+            DbgPrint(TRACE_LEVEL_INFORMATION,
+                     ("<--> %s ctrl vq full (ret=0x%x) re-staging buf=%p total_requeues=%ld\n",
+                      __FUNCTION__, ret, queuedBuf, requeues));
+
             ExInterlockedInsertHeadList(&m_CtrlQueueList, &queuedBuf->ctrl_queue_entry, &m_CtrlQueueSpinLock);
             InterlockedExchange(&m_CtrlQueueFlushInProgress, 0);
-
-            if (ret == (UINT)-1)
-            {
-                DbgPrint(TRACE_LEVEL_ERROR, ("<--> %s submit failed while flushing pending ctrl queue\n", __FUNCTION__));
-            }
             return ret;
         }
 
@@ -1313,12 +1390,23 @@ UINT CtrlQueue::QueueBuffer(PGPU_VBUFFER buf)
 
     if (!ValidateCtrlQueueBuffer(buf))
     {
+        // Rejected before staging: nothing was queued, so the caller still owns
+        // the buffer and is responsible for releasing it. This is the ONLY
+        // caller-visible failure.
         return (UINT)-1;
     }
 
     ExInterlockedInsertTailList(&m_CtrlQueueList, &buf->ctrl_queue_entry, &m_CtrlQueueSpinLock);
     InterlockedExchange(&m_CtrlQueueFlushRequested, 1);
 
+    // The buffer is now staged and owned by the queue. Flush() drains as much as
+    // the control virtqueue currently accepts; whatever it cannot submit right
+    // now (vq full) stays staged and is drained by a later Flush(). Flush()'s
+    // return describes the *flush attempt*, not this buffer -- a non-zero
+    // "not drained yet" must NOT be reported to the caller as this buffer
+    // failing, or the caller releases a buffer the queue still owns and the
+    // retry submits/frees it a second time. The enqueue itself cannot fail
+    // (list insert), so report success.
     Flush();
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));

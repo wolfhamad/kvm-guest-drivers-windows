@@ -277,6 +277,7 @@ class CtrlQueue : public VioGpuQueue
         KeInitializeSpinLock(&m_CtrlQueueSpinLock);
         m_CtrlQueueFlushInProgress = 0;
         m_CtrlQueueFlushRequested = 0;
+        m_CtrlQueueFullRequeues = 0;
     };
 
     PVOID AllocCmd(PGPU_VBUFFER *buf, int sz);
@@ -309,8 +310,12 @@ class CtrlQueue : public VioGpuQueue
     void DestroyResource(UINT id);
     void CtxResource(bool attach, UINT ctx_id, UINT res_id);
 
-    void SubmitCommand(void *cmdbuf, ULONG size, ULONG ctx_id, void (*complete_cb)(void *), void *complete_ctx);
-    void TransferHostCmd(bool to_host,
+    UINT SubmitCommand(void *cmdbuf,
+                       ULONG size,
+                       ULONG ctx_id,
+                       void (*complete_cb)(void *),
+                       void *complete_ctx);
+    UINT TransferHostCmd(bool to_host,
                          ULONG res_id,
                          VIOGPU_TRANSFER_CMD *options,
                          void (*complete_cb)(void *),
@@ -355,6 +360,10 @@ class CtrlQueue : public VioGpuQueue
     KSPIN_LOCK m_CtrlQueueSpinLock;
     volatile LONG m_CtrlQueueFlushInProgress;
     volatile LONG m_CtrlQueueFlushRequested;
+    // Count of transient "control vq full" re-stagings. Non-zero here means the
+    // queue is applying backpressure (packets staged, drained by a later Flush);
+    // it is NOT an error. Watch this to confirm how often the vq runs dry.
+    volatile LONG m_CtrlQueueFullRequeues;
     IVioGpuQueueSync *m_SyncExec = NULL;
 };
 
