@@ -755,13 +755,14 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
     UNREFERENCED_PARAMETER(pVioGpuEscape);
 
     UINT size = pEscape->PrivateDriverDataSize;
-    if (size < sizeof(PVIOGPU_ESCAPE))
+    const UINT requiredSize = sizeof(VIOGPU_ESCAPE);
+    if (size < requiredSize)
     {
         DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s buffer too small %d, should be at least %d\n",
+                 ("%s buffer too small %u, should be at least %u\n",
                   __FUNCTION__,
                   pEscape->PrivateDriverDataSize,
-                  size));
+                  requiredSize));
         return STATUS_INVALID_BUFFER_SIZE;
     }
 
