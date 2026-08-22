@@ -959,12 +959,23 @@ APIENTRY
 VioGpu3DDdiGetScanLine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETSCANLINE *pGetScanLine)
 {
     PAGED_CODE();
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pGetScanLine);
+    VIOGPU_ASSERT_CHK(hAdapter != NULL);
 
-    DbgBreakPoint();
-    DbgPrint(TRACE_LEVEL_ERROR, ("Not imp %s\n", __FUNCTION__));
-    return STATUS_NO_MEMORY;
+    if (pGetScanLine == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    VioGpuAdapter *pAdapter = reinterpret_cast<VioGpuAdapter *>(hAdapter);
+    if (!pAdapter->IsDriverActive())
+    {
+        VIOGPU_LOG_ASSERTION1("VIOGPU (%p) is being called when not active!", pAdapter);
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    pGetScanLine->InVerticalBlank = FALSE;
+    pGetScanLine->ScanLine = 0;
+    return STATUS_SUCCESS;
 }
 
 // END: Paged Code
