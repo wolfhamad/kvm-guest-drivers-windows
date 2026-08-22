@@ -354,6 +354,10 @@ class CtrlQueue : public VioGpuQueue
                              BOOLEAN kickOnSuccess);
     UINT SubmitBuffer(PGPU_VBUFFER buf);
     UINT QueueBuffer(PGPU_VBUFFER buf);
+    // Submit vbuf and wait for the host reply. Five-second waits are repeated
+    // only to log stalled requests; a submitted request is never abandoned.
+    // STATUS_SUCCESS => caller owns vbuf; failure => vbuf was reclaimed.
+    NTSTATUS QueueSyncBuffer(PGPU_VBUFFER vbuf);
 
     volatile LONG m_FenceIdr;
     LIST_ENTRY m_CtrlQueueList;

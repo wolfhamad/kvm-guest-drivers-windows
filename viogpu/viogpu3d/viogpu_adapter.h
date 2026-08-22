@@ -98,6 +98,7 @@ class VioGpuAdapter : IVioGpuPCI, public IVioGpuQueueSync
     CrsrQueue m_CursorQueue;
     VioGpuBuf m_GpuBuf;
     volatile ULONG m_PendingWorks;
+    volatile LONG m_InterruptsClosing;
     KEVENT m_ConfigUpdateEvent;
     PETHREAD m_pWorkThread;
     BOOLEAN m_bStopWorkThread;
@@ -277,11 +278,17 @@ class VioGpuAdapter : IVioGpuPCI, public IVioGpuQueueSync
     void VioGpuAdapterClose(void);
     NTSTATUS VirtIoDeviceInit(void);
     BOOLEAN AckFeature(UINT64 Feature);
+    void SynchronizeInterruptsForClose(void);
 
     void static ThreadWork(_In_ PVOID Context);
+    NTSTATUS StartWorkThread(void);
+    void StopWorkThread(void);
     void ThreadWorkRoutine(void);
 
     void ConfigChanged(void);
+
+    // Query every advertised capset synchronously during hardware init.
+    void NegotiateCapsets(void);
 
     VOID CreateResolutionEvent(VOID);
     VOID NotifyResolutionEvent(VOID);

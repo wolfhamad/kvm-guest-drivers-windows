@@ -102,6 +102,13 @@ static BOOLEAN CtrlQueueSyncExecRoutine(PVOID ctxVoid)
     return TRUE;
 }
 
+static BOOLEAN InterruptCloseBarrier(PVOID)
+{
+    return TRUE;
+}
+
+#define VIOGPU_WORK_THREAD_WAIT_LOG_INTERVAL_MS 5000
+
 BOOLEAN VioGpuAdapter::ExecuteSynchronized(VIOGPU_SYNC_EXEC_ROUTINE routine, void *routineCtx)
 {
     if (!routine)
@@ -167,6 +174,7 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     m_Id = g_InstanceId++;
     m_shmem_allocator.Init(0);
     m_PendingWorks = 0;
+    m_InterruptsClosing = 1;
     RtlZeroMemory((void *)m_lastNotifiedFence, sizeof(m_lastNotifiedFence));
     RtlZeroMemory((void *)m_preemptSubmittedOutstanding, sizeof(m_preemptSubmittedOutstanding));
     RtlZeroMemory((void *)m_pendingPreemptionFence, sizeof(m_pendingPreemptionFence));
@@ -182,6 +190,7 @@ VioGpuAdapter::VioGpuAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     m_ResolutionEventHandle = NULL;
     m_u32NumCapsets = 0;
     m_u32NumScanouts = 0;
+    m_supportedCapsetIDs = 0;
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
@@ -191,8 +200,8 @@ VioGpuAdapter::~VioGpuAdapter(void)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
-    CloseResolutionEvent();
     VioGpuAdapterClose();
+    CloseResolutionEvent();
     HWClose();
     m_Id = 0;
 }
@@ -298,10 +307,11 @@ NTSTATUS VioGpuAdapter::StopDevice(VOID)
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
-    vidpn.Stop();
-    virtio_device_reset(&m_VioDev);
-
     m_Flags.DriverStarted = FALSE;
+    vidpn.StopVsyncTimer();
+    StopWorkThread();
+    vidpn.Stop();
+    VioGpuAdapterClose();
     return STATUS_SUCCESS;
 }
 
@@ -418,7 +428,15 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
                     status = VioGpuAdapterInit();
                     if (NT_SUCCESS(status))
                     {
-                        vidpn.StartVsyncTimer();
+                        status = StartWorkThread();
+                        if (NT_SUCCESS(status))
+                        {
+                            vidpn.StartVsyncTimer();
+                        }
+                        else
+                        {
+                            VioGpuAdapterClose();
+                        }
                     }
                 }
                 break;
@@ -426,6 +444,8 @@ NTSTATUS VioGpuAdapter::SetPowerState(_In_ ULONG HardwareUid,
             case PowerDeviceD2:
             case PowerDeviceD3:
                 {
+                    vidpn.StopVsyncTimer();
+                    StopWorkThread();
                     vidpn.Powerdown();
                     VioGpuAdapterClose();
                 }
@@ -1849,6 +1869,7 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
     if (status == STATUS_SUCCESS)
     {
         virtio_device_ready(&m_VioDev);
+        InterlockedExchange(&m_InterruptsClosing, 0);
         SetHardwareInit(TRUE);
     }
     else
@@ -1867,20 +1888,56 @@ void VioGpuAdapter::VioGpuAdapterClose()
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_FATAL, ("---> %s\n", __FUNCTION__));
     vidpn.StopVsyncTimer();
-    m_shmem_allocator.Reset();
+    StopWorkThread();
 
     if (IsHardwareInit())
     {
-        SetHardwareInit(FALSE);
+        InterlockedExchange(&m_InterruptsClosing, 1);
+        SynchronizeInterruptsForClose();
         ctrlQueue.DisableInterrupt();
         m_CursorQueue.DisableInterrupt();
+        KeFlushQueuedDpcs();
+        SetHardwareInit(FALSE);
+        InterlockedExchange((PLONG)&m_PendingWorks, 0);
+        KeClearEvent(&m_ConfigUpdateEvent);
         virtio_device_reset(&m_VioDev);
         virtio_delete_queues(&m_VioDev);
         ctrlQueue.Close();
         m_CursorQueue.Close();
         virtio_device_shutdown(&m_VioDev);
     }
+    m_shmem_allocator.Reset();
     DbgPrint(TRACE_LEVEL_FATAL, ("<--- %s\n", __FUNCTION__));
+}
+
+void VioGpuAdapter::SynchronizeInterruptsForClose(void)
+{
+    PAGED_CODE();
+
+    const ULONG messageCount = m_PciResources.IsMSIEnabled() ? 3 : 1;
+    for (ULONG messageNumber = 0; messageNumber < messageCount; messageNumber++)
+    {
+        BOOLEAN callbackRet = FALSE;
+        NTSTATUS status = m_DxgkInterface.DxgkCbSynchronizeExecution(m_DxgkInterface.DeviceHandle,
+                                                                      InterruptCloseBarrier,
+                                                                      NULL,
+                                                                      messageNumber,
+                                                                      &callbackRet);
+        if (!NT_SUCCESS(status) || !callbackRet)
+        {
+            DbgPrint(TRACE_LEVEL_FATAL,
+                     ("%s failed message=%lu status=0x%x callback=%u -> bugcheck\n",
+                      __FUNCTION__,
+                      messageNumber,
+                      status,
+                      callbackRet));
+            KeBugCheckEx(0x000000E2,
+                         static_cast<ULONG_PTR>('SIVg'),
+                         static_cast<ULONG_PTR>(messageNumber),
+                         static_cast<ULONG_PTR>(status),
+                         static_cast<ULONG_PTR>(callbackRet));
+        }
+    }
 }
 
 BOOLEAN VioGpuAdapter::AckFeature(UINT64 Feature)
@@ -1966,12 +2023,115 @@ VOID VioGpuAdapter::CloseResolutionEvent(VOID)
     }
 }
 
+NTSTATUS VioGpuAdapter::StartWorkThread(void)
+{
+    PAGED_CODE();
+
+    if (m_pWorkThread != NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    m_bStopWorkThread = FALSE;
+
+    HANDLE threadHandle = NULL;
+    NTSTATUS status = PsCreateSystemThread(&threadHandle,
+                                           (ACCESS_MASK)0,
+                                           NULL,
+                                           (HANDLE)0,
+                                           NULL,
+                                           VioGpuAdapter::ThreadWork,
+                                           this);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to create system thread, status 0x%x\n", __FUNCTION__, status));
+        return status;
+    }
+
+    PETHREAD workThread = NULL;
+    status = ObReferenceObjectByHandle(threadHandle,
+                                       THREAD_ALL_ACCESS,
+                                       NULL,
+                                       KernelMode,
+                                       reinterpret_cast<PVOID *>(&workThread),
+                                       NULL);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("%s failed to reference system thread, status 0x%x -> bugcheck\n", __FUNCTION__, status));
+        KeBugCheckEx(0x000000E2,
+                     static_cast<ULONG_PTR>('RIVg'),
+                     reinterpret_cast<ULONG_PTR>(threadHandle),
+                     static_cast<ULONG_PTR>(status),
+                     0);
+    }
+
+    ZwClose(threadHandle);
+    m_pWorkThread = workThread;
+    return STATUS_SUCCESS;
+}
+
+void VioGpuAdapter::StopWorkThread(void)
+{
+    PAGED_CODE();
+
+    PETHREAD workThread = m_pWorkThread;
+    if (workThread == NULL)
+    {
+        m_bStopWorkThread = TRUE;
+        return;
+    }
+
+    m_bStopWorkThread = TRUE;
+    KeSetEvent(&m_ConfigUpdateEvent, IO_NO_INCREMENT, FALSE);
+
+    ULONG timeoutCount = 0;
+    for (;;)
+    {
+        LARGE_INTEGER timeout = {};
+        timeout.QuadPart = Int32x32To64(VIOGPU_WORK_THREAD_WAIT_LOG_INTERVAL_MS, -10000);
+        NTSTATUS status = KeWaitForSingleObject(workThread,
+                                                Executive,
+                                                KernelMode,
+                                                FALSE,
+                                                &timeout);
+        if (status == STATUS_TIMEOUT)
+        {
+            timeoutCount++;
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("%s worker still stopping after %lu x %u ms thread=%p\n",
+                      __FUNCTION__,
+                      timeoutCount,
+                      VIOGPU_WORK_THREAD_WAIT_LOG_INTERVAL_MS,
+                      workThread));
+            continue;
+        }
+
+        if (status != STATUS_SUCCESS)
+        {
+            DbgPrint(TRACE_LEVEL_FATAL,
+                     ("%s permanent worker wait failure status=0x%x thread=%p -> bugcheck\n",
+                      __FUNCTION__,
+                      status,
+                      workThread));
+            KeBugCheckEx(0x000000E2,
+                         static_cast<ULONG_PTR>('TIVg'),
+                         reinterpret_cast<ULONG_PTR>(workThread),
+                         static_cast<ULONG_PTR>(status),
+                         static_cast<ULONG_PTR>(timeoutCount));
+        }
+        break;
+    }
+
+    m_pWorkThread = NULL;
+    ObDereferenceObject(workThread);
+}
+
 NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 {
     PAGED_CODE();
 
     NTSTATUS status = STATUS_SUCCESS;
-    HANDLE threadHandle = 0;
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
     UINT size = 0;
     do
@@ -2023,76 +2183,16 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
             break;
         }
 
+        // Capset queries are synchronous. A stalled host is reported by the
+        // control-queue wait diagnostics without abandoning the request.
         m_supportedCapsetIDs = 0;
-        for (UINT32 i = 0; i < m_u32NumCapsets; i++)
-        {
-            PGPU_VBUFFER vbuf = NULL;
-
-            DbgPrint(TRACE_LEVEL_VERBOSE,
-                     ("%s querying capset info index=%d/%d\n", __FUNCTION__, i, m_u32NumCapsets));
-
-            /* ARE 2025-08-30 Spice server v0.16.0 does not return CapsetInfo if the display is not visible */
-
-            if (!ctrlQueue.AskCapsetInfo(&vbuf, i))
-            {
-                DbgPrint(TRACE_LEVEL_ERROR, ("%s AskCapsetInfo failed for index %d\n", __FUNCTION__, i));
-                continue;
-            }
-
-            PGPU_RESP_CAPSET_INFO resp = (PGPU_RESP_CAPSET_INFO)vbuf->resp_buf;
-            ULONG capset_id = resp->capset_id;
-            if (capset_id > 63 || capset_id <= 0)
-            {
-                DbgPrint(TRACE_LEVEL_WARNING,
-                         ("%s invalid capset response index=%d id=%d resp_type=0x%x\n",
-                          __FUNCTION__,
-                          i,
-                          capset_id,
-                          resp->hdr.type));
-                ctrlQueue.ReleaseBuffer(vbuf);
-                continue; // Invalid capset id, capsets ids are in range from 1 to 63 per specification
-            }
-            m_capsetInfos[capset_id].id = capset_id;
-            m_capsetInfos[capset_id].max_size = resp->capset_max_size;
-            m_capsetInfos[capset_id].max_version = resp->capset_max_version;
-            m_supportedCapsetIDs |= 1ull << capset_id;
-            DbgPrint(TRACE_LEVEL_FATAL,
-                     ("CAPSET INFO %d    id: %d; version: %d; size: %d\n",
-                      i,
-                      capset_id,
-                      resp->capset_max_size,
-                      resp->capset_max_version));
-            ctrlQueue.ReleaseBuffer(vbuf);
-        }
-
-        if (m_supportedCapsetIDs == 0)
-        {
-            DbgPrint(TRACE_LEVEL_WARNING,
-                     ("%s no capsets negotiated (num_capsets=%d), continuing with limited functionality\n",
-                      __FUNCTION__,
-                      m_u32NumCapsets));
-        }
+        NegotiateCapsets();
 
     } while (0);
-    // FIXME!!! exit if the block above failed
-
-    status = PsCreateSystemThread(&threadHandle,
-                                  (ACCESS_MASK)0,
-                                  NULL,
-                                  (HANDLE)0,
-                                  NULL,
-                                  VioGpuAdapter::ThreadWork,
-                                  this);
-
     if (!NT_SUCCESS(status))
     {
-        DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to create system thread, status %x\n", __FUNCTION__, status));
-        VioGpuDbgBreak();
         return status;
     }
-    ObReferenceObjectByHandle(threadHandle, THREAD_ALL_ACCESS, NULL, KernelMode, (PVOID *)(&m_pWorkThread), NULL);
-
-    ZwClose(threadHandle);
 
     PHYSICAL_ADDRESS fb_pa = m_PciResources.GetPciBar(0)->GetPA();
     UINT fb_size = (UINT)m_PciResources.GetPciBar(0)->GetSize();
@@ -2115,6 +2215,15 @@ NTSTATUS VioGpuAdapter::HWInit(PCM_RESOURCE_LIST pResList)
         DbgPrint(TRACE_LEVEL_FATAL, ("%s failed to allocate FB memory segment\n", __FUNCTION__));
         status = STATUS_INSUFFICIENT_RESOURCES;
         VioGpuDbgBreak();
+        VioGpuAdapterClose();
+        return status;
+    }
+
+    status = StartWorkThread();
+    if (!NT_SUCCESS(status))
+    {
+        frameSegment.Close();
+        VioGpuAdapterClose();
         return status;
     }
 
@@ -2125,24 +2234,7 @@ NTSTATUS VioGpuAdapter::HWClose(void)
 {
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s\n", __FUNCTION__));
-    SetHardwareInit(FALSE);
-
-    LARGE_INTEGER timeout = {0};
-    timeout.QuadPart = Int32x32To64(1000, -10000);
-
-    m_bStopWorkThread = TRUE;
-    KeSetEvent(&m_ConfigUpdateEvent, IO_NO_INCREMENT, FALSE);
-
-    if (m_pWorkThread)
-    {
-    if (KeWaitForSingleObject(m_pWorkThread, Executive, KernelMode, FALSE, &timeout) == STATUS_TIMEOUT)
-    {
-        DbgPrint(TRACE_LEVEL_FATAL, ("---> Failed to exit the worker thread\n"));
-        VioGpuDbgBreak();
-    }
-
-    ObDereferenceObject(m_pWorkThread);
-    }
+    StopWorkThread();
 
     frameSegment.Close();
 
@@ -2239,7 +2331,7 @@ PAGED_CODE_SEG_END
 
 BOOLEAN VioGpuAdapter::InterruptRoutine(_In_ ULONG MessageNumber)
 {
-    if (!IsHardwareInit())
+    if (!IsHardwareInit() || InterlockedCompareExchange(&m_InterruptsClosing, 0, 0) != 0)
     {
         return FALSE;
     }
@@ -2364,6 +2456,58 @@ void VioGpuAdapter::ThreadWorkRoutine(void)
 
         ConfigChanged();
         NotifyResolutionEvent();
+    }
+}
+
+void VioGpuAdapter::NegotiateCapsets(void)
+{
+    PAGED_CODE();
+
+    for (UINT32 i = 0; i < m_u32NumCapsets; i++)
+    {
+        PGPU_VBUFFER vbuf = NULL;
+
+        DbgPrint(TRACE_LEVEL_VERBOSE,
+                 ("%s querying capset info index=%d/%d\n", __FUNCTION__, i, m_u32NumCapsets));
+
+        if (!ctrlQueue.AskCapsetInfo(&vbuf, i))
+        {
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s AskCapsetInfo failed for index %d\n", __FUNCTION__, i));
+            continue;
+        }
+
+        PGPU_RESP_CAPSET_INFO resp = (PGPU_RESP_CAPSET_INFO)vbuf->resp_buf;
+        ULONG capset_id = resp->capset_id;
+        if (capset_id == 0 || capset_id > VIRTIO_GPU_MAX_CAPSET_ID)
+        {
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("%s invalid capset response index=%d id=%d resp_type=0x%x\n",
+                      __FUNCTION__,
+                      i,
+                      capset_id,
+                      resp->hdr.type));
+            ctrlQueue.ReleaseBuffer(vbuf);
+            continue; // Invalid capset id, capsets ids are in range from 1 to 63 per specification
+        }
+        m_capsetInfos[capset_id].id = capset_id;
+        m_capsetInfos[capset_id].max_size = resp->capset_max_size;
+        m_capsetInfos[capset_id].max_version = resp->capset_max_version;
+        m_supportedCapsetIDs |= 1ull << capset_id;
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("CAPSET INFO %d    id: %d; version: %d; size: %d\n",
+                  i,
+                  capset_id,
+                  resp->capset_max_size,
+                  resp->capset_max_version));
+        ctrlQueue.ReleaseBuffer(vbuf);
+    }
+
+    if (m_supportedCapsetIDs == 0)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s no capsets negotiated (num_capsets=%d), continuing with limited functionality\n",
+                  __FUNCTION__,
+                  m_u32NumCapsets));
     }
 }
 
