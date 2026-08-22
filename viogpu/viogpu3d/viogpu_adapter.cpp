@@ -890,6 +890,75 @@ NTSTATUS VioGpuAdapter::Escape(_In_ CONST DXGKARG_ESCAPE *pEscape)
 
                 break;
             }
+        case VIOGPU_RES_ATTACH_WAIT:
+            {
+                size = sizeof(VIOGPU_RES_ATTACH_WAIT_REQ);
+                if (pVioGpuEscape->DataLength < size)
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("%s buffer too small %d, should be at least %d\n",
+                              __FUNCTION__,
+                              pVioGpuEscape->DataLength,
+                              size));
+                    return STATUS_INVALID_BUFFER_SIZE;
+                }
+
+                VioGpuAllocation *allocation = AllocationFromHandle(pVioGpuEscape->ResourceAttachWait.ResHandle);
+                if (allocation == NULL)
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR, ("%s invalid attach-wait handle\n", __FUNCTION__));
+                    return STATUS_INVALID_PARAMETER;
+                }
+
+                VioGpuDevice *device = reinterpret_cast<VioGpuDevice *>(pEscape->hDevice);
+                if (device == NULL)
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR, ("%s attach-wait without device context\n", __FUNCTION__));
+                    return STATUS_INVALID_PARAMETER;
+                }
+                if (!virtio_is_feature_enabled(m_u64GuestFeatures, VIRTIO_GPU_F_CONTEXT_INIT))
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("%s attach-wait requires negotiated CONTEXT_INIT\n", __FUNCTION__));
+                    return STATUS_NOT_SUPPORTED;
+                }
+                if (!device->IsContextCreated())
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("%s attach-wait before context creation ctx_id=0x%x\n",
+                              __FUNCTION__, device->GetId()));
+                    return STATUS_DEVICE_NOT_READY;
+                }
+                if (!device->IsVenusContext())
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("%s attach-wait requires a Venus context ctx_id=0x%x capset=0x%x\n",
+                              __FUNCTION__, device->GetId(), device->GetCapsetId()));
+                    return STATUS_NOT_SUPPORTED;
+                }
+
+                if (allocation->IsBlob())
+                {
+                    status = allocation->EnsureBlobCreatedAndWait(device->GetId());
+                    if (!NT_SUCCESS(status))
+                    {
+                        DbgPrint(TRACE_LEVEL_ERROR,
+                                 ("%s attach-wait blob create failed status=0x%x res_id=0x%x ctx_id=0x%x\n",
+                                  __FUNCTION__, status, allocation->GetId(), device->GetId()));
+                        return status;
+                    }
+                }
+
+                pVioGpuEscape->ResourceAttachWait.Id = allocation->GetId();
+                status = ctrlQueue.CtxResourceWait(device->GetId(), allocation->GetId());
+                if (!NT_SUCCESS(status))
+                {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("%s attach-wait failed status=0x%x res_id=0x%x ctx_id=0x%x\n",
+                              __FUNCTION__, status, allocation->GetId(), device->GetId()));
+                }
+                break;
+            }
         case VIOGPU_RES_BUSY:
             {
                 size = sizeof(VIOGPU_RES_BUSY_REQ);

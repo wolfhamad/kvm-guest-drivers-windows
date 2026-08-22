@@ -72,6 +72,9 @@ typedef struct _CTRL_QUEUE_WAIT_CTX
     PGPU_VBUFFER vbuf;
     UINT command_type;
     UINT context_id;
+    UINT expected_response_type;
+    ULONGLONG expected_fence_id;
+    BOOLEAN validate_fence;
     KEVENT event;
     NTSTATUS status;
     volatile LONG refs;
@@ -126,10 +129,19 @@ static void CtrlQueueWaitCompleteCB(void *ctx_void)
     }
 
     ctx->status = STATUS_SUCCESS;
-    if (ctx->vbuf && ctx->vbuf->resp_buf)
+    if (!ctx->vbuf || !ctx->vbuf->resp_buf)
+    {
+        ctx->status = STATUS_UNSUCCESSFUL;
+    }
+    else
     {
         PGPU_CTRL_HDR resp = reinterpret_cast<PGPU_CTRL_HDR>(ctx->vbuf->resp_buf);
-        if (!resp || resp->type >= VIRTIO_GPU_RESP_ERR_UNSPEC)
+        if (!resp ||
+            (ctx->expected_response_type && resp->type != ctx->expected_response_type) ||
+            (!ctx->expected_response_type && resp->type >= VIRTIO_GPU_RESP_ERR_UNSPEC) ||
+            (ctx->validate_fence &&
+             (!(resp->flags & VIRTIO_GPU_FLAG_FENCE) ||
+              resp->fence_id != ctx->expected_fence_id)))
         {
             ctx->status = STATUS_UNSUCCESSFUL;
         }
@@ -995,6 +1007,72 @@ void CtrlQueue::CtxResource(bool attach, UINT ctx_id, UINT res_id)
     QueueBuffer(vbuf);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+}
+
+NTSTATUS CtrlQueue::CtxResourceWait(UINT ctx_id, UINT res_id)
+{
+    PAGED_CODE();
+
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("---> %s ctx_id=0x%x res_id=0x%x\n",
+              __FUNCTION__, ctx_id, res_id));
+
+    PCTRL_QUEUE_WAIT_CTX wait_ctx = CtrlQueueAllocWaitCtx();
+    if (!wait_ctx)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    PGPU_CMD_CTX_RESOURCE cmd;
+    PGPU_VBUFFER vbuf;
+    cmd = (PGPU_CMD_CTX_RESOURCE)AllocCmd(&vbuf, sizeof(*cmd));
+    if (!cmd || !vbuf)
+    {
+        CtrlQueueCancelWaitCtx(wait_ctx);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(cmd, sizeof(*cmd));
+
+    /*
+     * OpenAllocation may have queued its attach before the lazily-created
+     * Venus context existed.  Re-issue the real attach here.  The current
+     * proxy treats duplicate attaches as idempotent.
+     *
+     * INFO_RING_IDX routes the fence through the target renderer context.
+     * On the Venus proxy, IMPORT_RESOURCE and the ring-0 SUBMIT_FENCE are then
+     * sent on the same socket and processed in order.  A plain FENCE would use
+     * QEMU's unrelated legacy context-0 fence.
+     */
+    cmd->hdr.type = VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE;
+    cmd->hdr.ctx_id = ctx_id;
+    cmd->hdr.flags = VIRTIO_GPU_FLAG_FENCE | VIRTIO_GPU_FLAG_INFO_RING_IDX;
+    cmd->hdr.fence_id = InterlockedIncrement(&m_FenceIdr);
+    cmd->hdr.ring_idx = 0;
+    cmd->resource_id = res_id;
+
+    CtrlQueueSetWaitBuffer(wait_ctx, vbuf);
+    wait_ctx->expected_response_type = VIRTIO_GPU_RESP_OK_NODATA;
+    wait_ctx->expected_fence_id = cmd->hdr.fence_id;
+    wait_ctx->validate_fence = TRUE;
+    vbuf->complete_cb = CtrlQueueWaitCompleteCB;
+    vbuf->complete_ctx = wait_ctx;
+
+    UINT ret = QueueBuffer(vbuf);
+    if (ret)
+    {
+        ReleaseBuffer(vbuf);
+        CtrlQueueCancelWaitCtx(wait_ctx);
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s failed to queue context wait ctx_id=0x%x res_id=0x%x ret=%u\n",
+                  __FUNCTION__, ctx_id, res_id, ret));
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    NTSTATUS status = CtrlQueueWaitForCompletion(wait_ctx);
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("<--- %s ctx_id=0x%x res_id=0x%x status=0x%x\n",
+              __FUNCTION__, ctx_id, res_id, status));
+    return status;
 }
 
 PAGED_CODE_SEG_END

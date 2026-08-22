@@ -146,7 +146,8 @@ typedef struct virtio_gpu_box
 } GPU_BOX, *PGPU_BOX;
 #pragma pack()
 
-#define VIRTIO_GPU_FLAG_FENCE (1 << 0)
+#define VIRTIO_GPU_FLAG_FENCE         (1 << 0)
+#define VIRTIO_GPU_FLAG_INFO_RING_IDX (1 << 1)
 
 #pragma pack(1)
 typedef struct virtio_gpu_ctrl_hdr
@@ -155,7 +156,8 @@ typedef struct virtio_gpu_ctrl_hdr
     ULONG flags;
     ULONGLONG fence_id;
     ULONG ctx_id;
-    ULONG padding;
+    UCHAR ring_idx;
+    UCHAR padding[3];
 } GPU_CTRL_HDR, *PGPU_CTRL_HDR;
 #pragma pack()
 
