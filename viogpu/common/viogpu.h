@@ -201,6 +201,23 @@ typedef struct virtio_gpu_set_scanout
 } GPU_SET_SCANOUT, *PGPU_SET_SCANOUT;
 #pragma pack()
 
+/* VIRTIO_GPU_CMD_SET_SCANOUT_BLOB */
+#pragma pack(1)
+typedef struct virtio_gpu_set_scanout_blob
+{
+    GPU_CTRL_HDR hdr;
+    GPU_RECT r;
+    ULONG scanout_id;
+    ULONG resource_id;
+    ULONG width;
+    ULONG height;
+    ULONG format;
+    ULONG padding;
+    ULONG strides[4];
+    ULONG offsets[4];
+} GPU_SET_SCANOUT_BLOB, *PGPU_SET_SCANOUT_BLOB;
+#pragma pack()
+
 /* VIRTIO_GPU_CMD_RESOURCE_FLUSH */
 #pragma pack(1)
 typedef struct virtio_gpu_resource_flush

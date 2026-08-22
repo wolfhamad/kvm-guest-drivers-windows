@@ -322,6 +322,15 @@ class CtrlQueue : public VioGpuQueue
                          void *complete_ctx);
 
     void SetScanout(UINT scan_id, UINT res_id, UINT width, UINT height, UINT x, UINT y);
+    void SetScanoutBlob(UINT scan_id,
+                        UINT res_id,
+                        UINT width,
+                        UINT height,
+                        UINT x,
+                        UINT y,
+                        UINT format,
+                        UINT stride,
+                        UINT offset);
     UINT ResFlush(UINT res_id,
                   UINT width,
                   UINT height,

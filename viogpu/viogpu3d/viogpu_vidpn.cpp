@@ -2038,7 +2038,7 @@ void VioGpuVidPN::Flip()
 {
     if (InterlockedExchange(&m_shouldFlip, 0))
     {
-        if (m_sourceAddress.QuadPart != 0 && m_sourceRes != NULL)
+        if (m_sourceRes != NULL)
         {
             m_sourceRes->FlushToScreen(0);
         }

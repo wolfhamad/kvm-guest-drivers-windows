@@ -71,6 +71,7 @@ typedef struct _VIOGPU_ADAPTERINFO
 #define VIOGPU_RES_BUSY              0x101
 #define VIOGPU_RES_MAP_BLOB          0x102
 #define VIOGPU_RES_UNMAP_BLOB        0x103
+#define VIOGPU_RES_SET_SCANOUT_BLOB  0x105
 
 #define VIOGPU_CTX_INIT              0x200
 #define VIOGPU_SUBMIT_CMD            0x300
@@ -137,6 +138,21 @@ typedef struct _VIOGPU_RES_UNMAP_BLOB_REQ
 #pragma pack()
 
 #pragma pack(1)
+typedef struct _VIOGPU_RES_SET_SCANOUT_BLOB_REQ
+{
+    D3DKMT_HANDLE ResHandle;
+    ULONG ScanoutId;
+    ULONG Width;
+    ULONG Height;
+    ULONG X;
+    ULONG Y;
+    ULONG Format;
+    ULONG Stride;
+    ULONG Offset;
+} VIOGPU_RES_SET_SCANOUT_BLOB_REQ;
+#pragma pack()
+
+#pragma pack(1)
 typedef struct _VIOGPU_CTX_INIT_REQ
 {
     UINT CapsetID;
@@ -167,6 +183,7 @@ typedef struct _VIOGPU_ESCAPE
         VIOGPU_RES_BUSY_REQ ResourceBusy;
         VIOGPU_RES_MAP_BLOB_REQ ResourceMapBlob;
         VIOGPU_RES_UNMAP_BLOB_REQ ResourceUnmapBlob;
+        VIOGPU_RES_SET_SCANOUT_BLOB_REQ ResourceSetScanoutBlob;
 
         VIOGPU_CTX_INIT_REQ CtxInit;
     } DUMMYUNIONNAME;
@@ -204,6 +221,8 @@ typedef struct _VIOGPU_CREATE_ALLOCATION_EXCHANGE
     ULONGLONG BlobId;
     ULONG BlobMem;
     ULONG BlobFlags;
+    ULONG Stride;
+    ULONG ScanoutOffset;
 } VIOGPU_CREATE_ALLOCATION_EXCHANGE;
 #pragma pack()
 
@@ -245,6 +264,10 @@ typedef struct _VIOGPU_PRESENT_FLIP_CMD
     ULONG height;
     ULONG x;
     ULONG y;
+    ULONG is_blob;
+    ULONG format;
+    ULONG stride;
+    ULONG offset;
 } VIOGPU_PRESENT_FLIP_CMD;
 #pragma pack()
 

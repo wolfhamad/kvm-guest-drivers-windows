@@ -38,6 +38,15 @@ class VioGpuAllocation
     {
         return m_options.height;
     }
+    UINT GetFormat(void) const
+    {
+        return m_options.format;
+    }
+    UINT GetStride(void) const;
+    UINT GetScanoutOffset(void) const
+    {
+        return m_scanout_offset;
+    }
 
     void MarkBusy();
     void UnmarkBusy();
@@ -91,6 +100,14 @@ class VioGpuAllocation
     void DetachBacking();
 
     void FlushToScreen(UINT scan_id);
+    void FlushToScreen(UINT scan_id,
+                       UINT width,
+                       UINT height,
+                       UINT x,
+                       UINT y,
+                       UINT format,
+                       UINT stride,
+                       UINT offset);
 
     static NTSTATUS GetStandardAllocationDriverData(DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStandardAllocation);
     static NTSTATUS DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_CREATEALLOCATION *pCreateAllocation);
@@ -103,6 +120,7 @@ class VioGpuAllocation
     NTSTATUS EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy);
     NTSTATUS EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap, VioGpuDevice *device);
     NTSTATUS EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *resUnmap, VioGpuDevice *device);
+    NTSTATUS EscapeResourceSetScanoutBlob(VIOGPU_RES_SET_SCANOUT_BLOB_REQ *resScanout);
 
   private:
     static void BlobCreateCompleteCB(void *ctx_void);
@@ -125,6 +143,8 @@ class VioGpuAllocation
     UINT m_Id;
     bool m_is_blob;
     bool m_valid;
+    ULONG m_stride;
+    ULONG m_scanout_offset;
     ULONGLONG m_blob_size;
     ULONGLONG m_blob_id;
     ULONG m_blob_mem;

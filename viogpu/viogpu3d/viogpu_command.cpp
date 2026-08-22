@@ -429,12 +429,27 @@ void VioGpuCommand::Run()
 
                     InterlockedIncrement(&m_done);
 
-                    m_pAdapter->ctrlQueue.SetScanout(flipCmd->scan_id,
-                                                     flipCmd->res_id,
-                                                     flipCmd->width,
-                                                     flipCmd->height,
-                                                     flipCmd->x,
-                                                     flipCmd->y);
+                    if (flipCmd->is_blob)
+                    {
+                        m_pAdapter->ctrlQueue.SetScanoutBlob(flipCmd->scan_id,
+                                                             flipCmd->res_id,
+                                                             flipCmd->width,
+                                                             flipCmd->height,
+                                                             flipCmd->x,
+                                                             flipCmd->y,
+                                                             flipCmd->format,
+                                                             flipCmd->stride,
+                                                             flipCmd->offset);
+                    }
+                    else
+                    {
+                        m_pAdapter->ctrlQueue.SetScanout(flipCmd->scan_id,
+                                                         flipCmd->res_id,
+                                                         flipCmd->width,
+                                                         flipCmd->height,
+                                                         flipCmd->x,
+                                                         flipCmd->y);
+                    }
                     UINT ret = m_pAdapter->ctrlQueue.ResFlush(flipCmd->res_id,
                                                               flipCmd->width,
                                                               flipCmd->height,

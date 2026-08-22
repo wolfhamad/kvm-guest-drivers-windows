@@ -88,6 +88,8 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     m_options.bind = VIRGL_BIND_FOR_TARGET(m_options.target, m_options.bind);
     m_is_blob = exchange->BlobMem != 0;
     m_valid = true;
+    m_stride = exchange->Stride;
+    m_scanout_offset = exchange->ScanoutOffset;
     m_blob_size = ALIGN_UP_BY(exchange->Size, PAGE_SIZE);
     m_blob_id = exchange->BlobId;
     m_blob_mem = exchange->BlobMem;
@@ -119,6 +121,33 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     m_busy = 0;
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
+}
+
+UINT VioGpuAllocation::GetStride(void) const
+{
+    if (m_stride)
+    {
+        return m_stride;
+    }
+
+    switch (m_options.format)
+    {
+        case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM:
+        case VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM:
+            return m_options.width * 4;
+        default:
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("%s unsupported scanout format=%u, assuming 4 bytes per pixel\n",
+                      __FUNCTION__,
+                      m_options.format));
+            return m_options.width * 4;
+    }
 }
 
 NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
@@ -311,18 +340,66 @@ void VioGpuAllocation::UnmarkBusy()
 
 void VioGpuAllocation::FlushToScreen(UINT scan_id)
 {
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=%d\n", __FUNCTION__, m_Id));
+    FlushToScreen(scan_id, m_options.width, m_options.height, 0, 0,
+                  m_options.format, GetStride(), 0);
+}
 
-    GPU_BOX box;
-    box.x = 0;
-    box.y = 0;
-    box.z = 0;
-    box.width = m_options.width;
-    box.height = m_options.height;
-    box.depth = 1;
+void VioGpuAllocation::FlushToScreen(UINT scan_id,
+                                     UINT width,
+                                     UINT height,
+                                     UINT x,
+                                     UINT y,
+                                     UINT format,
+                                     UINT stride,
+                                     UINT offset)
+{
+    DbgPrint(TRACE_LEVEL_VERBOSE,
+             ("---> %s res_id=%d scanout=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u\n",
+              __FUNCTION__,
+              m_Id,
+              scan_id,
+              width,
+              height,
+              x,
+              y,
+              format,
+              stride,
+              offset));
 
-    m_adapter->ctrlQueue.SetScanout(scan_id, m_Id, m_options.width, m_options.height, 0, 0);
-    m_adapter->ctrlQueue.ResFlush(m_Id, m_options.width, m_options.height, 0, 0);
+    if (!width)
+    {
+        width = m_options.width;
+    }
+    if (!height)
+    {
+        height = m_options.height;
+    }
+    if (!format)
+    {
+        format = m_options.format;
+    }
+    if (!stride)
+    {
+        stride = GetStride();
+    }
+
+    if (m_is_blob)
+    {
+        m_adapter->ctrlQueue.SetScanoutBlob(scan_id,
+                                            m_Id,
+                                            width,
+                                            height,
+                                            x,
+                                            y,
+                                            format,
+                                            stride,
+                                            offset);
+    }
+    else
+    {
+        m_adapter->ctrlQueue.SetScanout(scan_id, m_Id, width, height, x, y);
+    }
+    m_adapter->ctrlQueue.ResFlush(m_Id, width, height, x, y);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s res_id=%d\n", __FUNCTION__, m_Id));
 }
@@ -369,6 +446,7 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
 
     allocationExchange->ResourceOptions.width = 1024;
     allocationExchange->ResourceOptions.height = 768;
+    allocationExchange->Stride = allocationExchange->ResourceOptions.width * 4;
     allocationExchange->ResourceOptions.depth = 1;
 
     allocationExchange->ResourceOptions.array_size = 1;
@@ -393,6 +471,7 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
                 allocationExchange->ResourceOptions.width = surfaceData->Width;
                 allocationExchange->ResourceOptions.height = surfaceData->Height;
                 allocationExchange->ResourceOptions.format = ColorFormat(surfaceData->Format);
+                allocationExchange->Stride = surfaceData->Width * 4;
                 allocationExchange->Size = (ULONGLONG)surfaceData->Width * (ULONGLONG)surfaceData->Height * 4;
 
                 DbgPrint(TRACE_LEVEL_ERROR,
@@ -414,6 +493,7 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
                 allocationExchange->ResourceOptions.width = surfaceData->Width;
                 allocationExchange->ResourceOptions.height = surfaceData->Height;
                 allocationExchange->ResourceOptions.format = ColorFormat(surfaceData->Format);
+                allocationExchange->Stride = surfaceData->Width * 4;
                 allocationExchange->Size = (ULONGLONG)surfaceData->Width * (ULONGLONG)surfaceData->Height * 4;
 
                 allocationExchange->ResourceOptions.flags |= VIRGL_RESOURCE_FLAG_MAP_COHERENT;
@@ -438,6 +518,7 @@ NTSTATUS VioGpuAllocation::GetStandardAllocationDriverData(DXGKARG_GETSTANDARDAL
                 allocationExchange->ResourceOptions.width = surfaceData->Width;
                 allocationExchange->ResourceOptions.height = surfaceData->Height;
                 allocationExchange->ResourceOptions.format = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM;
+                allocationExchange->Stride = surfaceData->Width * 4;
                 allocationExchange->Size = (ULONGLONG)surfaceData->Width * (ULONGLONG)surfaceData->Height * 4;
 
                 allocationExchange->ResourceOptions.flags |= VIRGL_RESOURCE_FLAG_MAP_COHERENT;
@@ -462,8 +543,12 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
 
     DXGK_ALLOCATIONINFO *allocationInfo = pCreateAllocation->pAllocationInfo;
 
-    if (max(allocationInfo->PrivateDriverDataSize, pCreateAllocation->PrivateDriverDataSize) <
-        sizeof(VIOGPU_CREATE_ALLOCATION_EXCHANGE))
+    const SIZE_T legacyExchangeSize =
+        FIELD_OFFSET(VIOGPU_CREATE_ALLOCATION_EXCHANGE, Stride);
+    SIZE_T resourceExchangeSize = allocationInfo->PrivateDriverDataSize;
+
+    if (max(resourceExchangeSize, pCreateAllocation->PrivateDriverDataSize) <
+        legacyExchangeSize)
     {
         DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s private driver data is too small\n", __FUNCTION__));
         return STATUS_INVALID_PARAMETER;
@@ -474,9 +559,15 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     if (pCreateAllocation->PrivateDriverDataSize > allocationInfo->PrivateDriverDataSize)
     {
         resourceExchange = (VIOGPU_CREATE_ALLOCATION_EXCHANGE *)pCreateAllocation->pPrivateDriverData;
+        resourceExchangeSize = pCreateAllocation->PrivateDriverDataSize;
     }
 
-    VioGpuAllocation *allocation = new (NonPagedPoolNx) VioGpuAllocation(adapter, resourceExchange);
+    VIOGPU_CREATE_ALLOCATION_EXCHANGE localExchange = {};
+    RtlCopyMemory(&localExchange,
+                  resourceExchange,
+                  min(resourceExchangeSize, sizeof(localExchange)));
+
+    VioGpuAllocation *allocation = new (NonPagedPoolNx) VioGpuAllocation(adapter, &localExchange);
     if (!allocation->IsValid())
     {
         delete allocation;
@@ -495,7 +586,7 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
                                (allocation->GetBlobFlags() & VIRTGPU_BLOB_FLAG_USE_MAPPABLE);
     if (mappable_blob)
     {
-        ULONGLONG alloc_size = ALIGN_UP_BY(resourceExchange->Size, PAGE_SIZE);
+        ULONGLONG alloc_size = ALIGN_UP_BY(localExchange.Size, PAGE_SIZE);
         ULONGLONG offset = 0;
         if (!adapter->AllocateShmemRange(alloc_size, PAGE_SIZE, &offset))
         {
@@ -519,7 +610,7 @@ NTSTATUS VioGpuAllocation::DxgkCreateAllocation(VioGpuAdapter *adapter, DXGKARG_
     }
 
     allocationInfo->Alignment = 0;
-    allocationInfo->Size = (SIZE_T)resourceExchange->Size;
+    allocationInfo->Size = (SIZE_T)localExchange.Size;
     allocationInfo->PitchAlignedSize = 0;
     allocationInfo->HintedBank.Value = 0;
     allocationInfo->AllocationPriority = D3DDDI_ALLOCATIONPRIORITY_NORMAL;
@@ -626,6 +717,46 @@ NTSTATUS VioGpuAllocation::EscapeResourceBusy(VIOGPU_RES_BUSY_REQ *resBusy)
 
     resBusy->IsBusy = m_busy != 0;
 
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpuAllocation::EscapeResourceSetScanoutBlob(VIOGPU_RES_SET_SCANOUT_BLOB_REQ *resScanout)
+{
+    PAGED_CODE();
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("<---> %s res_id=%d scanout=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u\n",
+              __FUNCTION__,
+              m_Id,
+              resScanout ? resScanout->ScanoutId : 0,
+              resScanout ? resScanout->Width : 0,
+              resScanout ? resScanout->Height : 0,
+              resScanout ? resScanout->X : 0,
+              resScanout ? resScanout->Y : 0,
+              resScanout ? resScanout->Format : 0,
+              resScanout ? resScanout->Stride : 0,
+              resScanout ? resScanout->Offset : 0));
+
+    if (!resScanout)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!m_is_blob)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!m_blob_created && m_blob_create_state == 0)
+    {
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    FlushToScreen(resScanout->ScanoutId,
+                  resScanout->Width,
+                  resScanout->Height,
+                  resScanout->X,
+                  resScanout->Y,
+                  resScanout->Format,
+                  resScanout->Stride,
+                  resScanout->Offset);
     return STATUS_SUCCESS;
 }
 

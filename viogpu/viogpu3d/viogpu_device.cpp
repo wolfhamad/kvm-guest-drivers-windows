@@ -248,6 +248,10 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
             flipCmd->height = src->GetHeight();
             flipCmd->x = 0;
             flipCmd->y = 0;
+            flipCmd->is_blob = src->IsBlob() ? 1 : 0;
+            flipCmd->format = src->GetFormat();
+            flipCmd->stride = src->GetStride();
+            flipCmd->offset = src->GetScanoutOffset();
 
             pPresent->pDmaBuffer = (char *)pPresent->pDmaBuffer + flipCommandSize;
         }

@@ -1228,6 +1228,58 @@ void CtrlQueue::SetScanout(UINT scan_id, UINT res_id, UINT width, UINT height, U
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 }
 
+void CtrlQueue::SetScanoutBlob(UINT scan_id,
+                               UINT res_id,
+                               UINT width,
+                               UINT height,
+                               UINT x,
+                               UINT y,
+                               UINT format,
+                               UINT stride,
+                               UINT offset)
+{
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s scan_id=0x%x res_id=0x%x\n", __FUNCTION__, scan_id, res_id));
+
+    PGPU_SET_SCANOUT_BLOB cmd;
+    PGPU_VBUFFER vbuf;
+    cmd = (PGPU_SET_SCANOUT_BLOB)AllocCmd(&vbuf, sizeof(*cmd));
+    RtlZeroMemory(cmd, sizeof(*cmd));
+
+    cmd->hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT_BLOB;
+    cmd->resource_id = res_id;
+    cmd->scanout_id = scan_id;
+    cmd->r.width = width;
+    cmd->r.height = height;
+    cmd->r.x = x;
+    cmd->r.y = y;
+    cmd->width = width;
+    cmd->height = height;
+    cmd->format = format;
+    cmd->strides[0] = stride;
+    cmd->offsets[0] = offset;
+
+    UINT ret = QueueBuffer(vbuf);
+    if (ret)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL,
+                 ("%s failed to queue set_scanout_blob scan=%u res=%u rect=%ux%u+%u+%u format=%u stride=%u offset=%u ret=%u\n",
+                  __FUNCTION__,
+                  scan_id,
+                  res_id,
+                  width,
+                  height,
+                  x,
+                  y,
+                  format,
+                  stride,
+                  offset,
+                  ret));
+        BugCheckCtrlQueueSubmitFailure(vbuf, ret);
+    }
+
+    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+}
+
 #define SGLIST_SIZE 256
 static const UINT VIRTQUEUE_NO_SPACE = static_cast<UINT>(-28); // -ENOSPC
 
