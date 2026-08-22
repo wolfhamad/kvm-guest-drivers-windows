@@ -618,6 +618,29 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 pDriverCaps->WDDMVersion = DXGKDDI_WDDMv1_3;
                 pDriverCaps->HighestAcceptableAddress.QuadPart = (ULONG64)-1;
 
+                /*
+                 * Zeroed PresentationCaps declares neither GDI hardware
+                 * acceleration nor CDD/DWM interop, leaving win32k no driver
+                 * path for windowed blt-model presents; it falls back to its
+                 * own software engine, where win32kfull!vDirectStretch32
+                 * accounts for ~99% of a DXGI_SWAP_EFFECT_DISCARD present.
+                 * Interop is the accurate declaration for us - we accelerate
+                 * no GDI operations.  The GDI blt acceleration bits
+                 * (SupportAllBltRops, SupportMirrorStretchBlt,
+                 * SupportMonoStretchBltModes) stay unset: they promise GDI
+                 * hardware DDIs this driver does not implement.
+                 */
+                pDriverCaps->PresentationCaps.DriverSupportsCddDwmInterop = 1;
+
+                /* Blt surface pitch alignment is (1 << AlignmentShift) bytes;
+                 * the DDI requires >= 2, so zero was out of spec. */
+                pDriverCaps->PresentationCaps.AlignmentShift = 2;
+
+                /* Max blt texture is 2 ^ (shift + DXGK_TEXTURE_SIZE_SHIFT):
+                 * 2048 at shift 0, 4096 at shift 1. */
+                pDriverCaps->PresentationCaps.MaxTextureWidthShift = 1;
+                pDriverCaps->PresentationCaps.MaxTextureHeightShift = 1;
+
                 pDriverCaps->FlipCaps.FlipOnVSyncMmIo = TRUE;
 
                 pDriverCaps->MaxQueuedFlipOnVSync = 1;
@@ -710,6 +733,10 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                         pSegmentDesc[1].Flags.Aperture = TRUE;
                         //pSegmentDesc[1].Flags.Aperture = FALSE;
 
+                        /* Declaring this segment coherent made no measurable
+                         * difference to the windowed blt-model present cost
+                         * (tried 2026-07-31); the CPU mapping attribute comes
+                         * from the per-allocation flags, not from here. */
                         pSegmentDesc[1].Flags.CacheCoherent = FALSE;
                         pSegmentDesc[1].Flags.CpuVisible = TRUE;
                         pSegmentDesc[1].Flags.DirectFlip = FALSE;
