@@ -206,7 +206,32 @@ class VioGpuQueue
     {
         if (m_pVirtQueue)
         {
-            virtqueue_kick_always(m_pVirtQueue);
+            //
+            // virtqueue_kick() asks the ring whether the host actually wants a
+            // notification before writing the notify register.  Every MMIO
+            // write out of a guest is a VM exit, so an unconditional kick
+            // costs roughly a microsecond whether or not anyone is listening.
+            //
+            // This used to be virtqueue_kick_always().  That was harmless when
+            // viogpu only carried modeset, cursor and the occasional resource
+            // op - a few kicks a second.  Once the same queue is used to
+            // submit 3D command streams it becomes about 3200 kicks per frame
+            // against 11 batches, and the exits measured 4.8 ms per frame,
+            // 22% of the frame, second only to the driver's own CPU time.
+            //
+            // Every other driver in this tree - netkvm, viostor, vioscsi,
+            // balloon, viorng, vioserial, viosock, viofs - already kicks this
+            // way; viogpu was the only caller of the unconditional form.
+            //
+            // Spelled out with the two inlines rather than virtqueue_kick(),
+            // which is a real function in VirtIOPCICommon.c - a file this
+            // driver does not build.  These two are inline in VirtIO.h and
+            // are what virtqueue_kick() does anyway.
+            //
+            if (virtqueue_kick_prepare(m_pVirtQueue))
+            {
+                virtqueue_kick_always(m_pVirtQueue);
+            }
         }
     }
     bool EnableInterrupt(void)
