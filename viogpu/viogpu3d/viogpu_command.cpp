@@ -12,6 +12,105 @@
 #pragma code_seg(push)
 #pragma code_seg()
 
+// Bytes per pixel for the (32bpp) scanout formats the present path deals with.
+// Kept in sync with VioGpuAllocation::GetStride().
+static UINT VioGpuBltBytesPerPixel(UINT format)
+{
+    switch (format)
+    {
+        case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM:
+        case VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM:
+            return 4;
+        default:
+            return 4;
+    }
+}
+
+enum VIOGPU_BLT_PIXEL_LAYOUT
+{
+    VIOGPU_BLT_LAYOUT_UNKNOWN = 0,
+    VIOGPU_BLT_LAYOUT_BGRA,
+    VIOGPU_BLT_LAYOUT_ARGB,
+    VIOGPU_BLT_LAYOUT_RGBA,
+    VIOGPU_BLT_LAYOUT_ABGR,
+};
+
+enum VIOGPU_BLT_COPY_MODE
+{
+    VIOGPU_BLT_COPY_UNSUPPORTED = 0,
+    VIOGPU_BLT_COPY_DIRECT,
+    VIOGPU_BLT_COPY_SWAP_RB,
+};
+
+static VIOGPU_BLT_PIXEL_LAYOUT VioGpuBltPixelLayout(UINT format)
+{
+    switch (format)
+    {
+        case VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM:
+            return VIOGPU_BLT_LAYOUT_BGRA;
+        case VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM:
+            return VIOGPU_BLT_LAYOUT_ARGB;
+        case VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM:
+        case VIRTIO_GPU_FORMAT_R8G8B8X8_UNORM:
+            return VIOGPU_BLT_LAYOUT_RGBA;
+        case VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM:
+        case VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM:
+            return VIOGPU_BLT_LAYOUT_ABGR;
+        default:
+            return VIOGPU_BLT_LAYOUT_UNKNOWN;
+    }
+}
+
+static VIOGPU_BLT_COPY_MODE VioGpuBltCopyMode(UINT src_format,
+                                               UINT dst_format)
+{
+    if (src_format == dst_format)
+    {
+        return VIOGPU_BLT_COPY_DIRECT;
+    }
+
+    const VIOGPU_BLT_PIXEL_LAYOUT src_layout =
+        VioGpuBltPixelLayout(src_format);
+    const VIOGPU_BLT_PIXEL_LAYOUT dst_layout =
+        VioGpuBltPixelLayout(dst_format);
+
+    if (src_layout == VIOGPU_BLT_LAYOUT_UNKNOWN ||
+        dst_layout == VIOGPU_BLT_LAYOUT_UNKNOWN)
+    {
+        return VIOGPU_BLT_COPY_UNSUPPORTED;
+    }
+
+    if (src_layout == dst_layout)
+    {
+        return VIOGPU_BLT_COPY_DIRECT;
+    }
+
+    if ((src_layout == VIOGPU_BLT_LAYOUT_RGBA &&
+         dst_layout == VIOGPU_BLT_LAYOUT_BGRA) ||
+        (src_layout == VIOGPU_BLT_LAYOUT_BGRA &&
+         dst_layout == VIOGPU_BLT_LAYOUT_RGBA))
+    {
+        return VIOGPU_BLT_COPY_SWAP_RB;
+    }
+
+    return VIOGPU_BLT_COPY_UNSUPPORTED;
+}
+
+static __forceinline ULONG VioGpuBltSwapRedBlue(ULONG pixel)
+{
+    return (pixel & 0xff00ff00u) |
+           ((pixel & 0x000000ffu) << 16) |
+           ((pixel & 0x00ff0000u) >> 16);
+}
+
 __declspec(noreturn) static void BugCheckDmaQueueSubmitFailure(PVOID command,
                                                                UINT fenceId,
                                                                UINT nodeOrdinal,
@@ -152,6 +251,380 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
               pSubmitCommand->DmaBufferSubmissionEndOffset));
 }
 
+void VioGpuCommand::ClearCpuCopyBlt()
+{
+    if (m_cpuCopySrc && m_cpuCopySrcVa)
+    {
+        m_cpuCopySrc->UnmapForCpuCopy(m_cpuCopySrcVa,
+                                      m_cpuCopySrcMapSize,
+                                      m_cpuCopySrcIo);
+    }
+    if (m_cpuCopyDst && m_cpuCopyDstVa)
+    {
+        m_cpuCopyDst->UnmapForCpuCopy(m_cpuCopyDstVa,
+                                      m_cpuCopyDstMapSize,
+                                      m_cpuCopyDstIo);
+    }
+
+    m_cpuCopyBlt = FALSE;
+    m_cpuCopyBltMapped = FALSE;
+    m_cpuCopySrc = NULL;
+    m_cpuCopyDst = NULL;
+    m_cpuCopySrcVa = NULL;
+    m_cpuCopyDstVa = NULL;
+    m_cpuCopySrcMapSize = 0;
+    m_cpuCopyDstMapSize = 0;
+    m_cpuCopySrcIo = FALSE;
+    m_cpuCopyDstIo = FALSE;
+    m_cpuCopySubRectCnt = 0;
+    RtlZeroMemory(&m_cpuCopySrcRect, sizeof(m_cpuCopySrcRect));
+    RtlZeroMemory(&m_cpuCopyDstRect, sizeof(m_cpuCopyDstRect));
+    RtlZeroMemory(m_cpuCopySubRects, sizeof(m_cpuCopySubRects));
+}
+
+NTSTATUS VioGpuCommand::SetCpuCopyBlt(VioGpuAllocation *src,
+                                      VioGpuAllocation *dst,
+                                      const RECT *srcRect,
+                                      const RECT *dstRect,
+                                      const RECT *subRects,
+                                      UINT subRectCnt)
+{
+    ClearCpuCopyBlt();
+
+    if (!src || !dst || !srcRect || !dstRect)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!src->IsBlob() || dst->IsBlob())
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    m_cpuCopyBlt = TRUE;
+    m_cpuCopySrc = src;
+    m_cpuCopyDst = dst;
+    m_cpuCopySrcRect = *srcRect;
+    m_cpuCopyDstRect = *dstRect;
+
+    // Capture the dirty sub-rectangles so only changed pixels are copied later
+    // (the copy runs from Run() at DISPATCH_LEVEL, long after pPresent is gone).
+    // The list is valid only during Present(), so snapshot it here.  If it does
+    // not fit, collapse to its bounding box - still far smaller than the whole
+    // blt rect for a localized update, and storage stays bounded.
+    m_cpuCopySubRectCnt = 0;
+    if (subRects && subRectCnt)
+    {
+        if (subRectCnt <= VIOGPU_BLT_MAX_SUBRECTS)
+        {
+            RtlCopyMemory(m_cpuCopySubRects, subRects,
+                          subRectCnt * sizeof(RECT));
+            m_cpuCopySubRectCnt = subRectCnt;
+        }
+        else
+        {
+            RECT cover = subRects[0];
+            for (UINT i = 1; i < subRectCnt; i++)
+            {
+                cover.left = min(cover.left, subRects[i].left);
+                cover.top = min(cover.top, subRects[i].top);
+                cover.right = max(cover.right, subRects[i].right);
+                cover.bottom = max(cover.bottom, subRects[i].bottom);
+            }
+            m_cpuCopySubRects[0] = cover;
+            m_cpuCopySubRectCnt = 1;
+        }
+    }
+
+    DbgPrint(TRACE_LEVEL_VERBOSE,
+             ("%s staged Venus BLT present src_res=0x%x dst_res=0x%x subrects=%u stored=%u src_rect=%ld,%ld-%ld,%ld dst_rect=%ld,%ld-%ld,%ld\n",
+              __FUNCTION__,
+              src->GetId(),
+              dst->GetId(),
+              subRectCnt,
+              m_cpuCopySubRectCnt,
+              srcRect->left,
+              srcRect->top,
+              srcRect->right,
+              srcRect->bottom,
+              dstRect->left,
+              dstRect->top,
+              dstRect->right,
+              dstRect->bottom));
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpuCommand::MapCpuCopyBlt(ULONG ctx_id)
+{
+    if (!m_cpuCopyBlt)
+    {
+        return STATUS_NOT_FOUND;
+    }
+
+    if (m_cpuCopyBltMapped)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    if (!m_cpuCopySrc || !m_cpuCopyDst)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PVOID src_va = NULL;
+    PVOID dst_va = NULL;
+    ULONGLONG src_map_size = 0;
+    ULONGLONG dst_map_size = 0;
+    BOOLEAN src_io = FALSE;
+    BOOLEAN dst_io = FALSE;
+
+    NTSTATUS status = m_cpuCopySrc->MapForCpuCopy(ctx_id, &src_va,
+                                                  &src_map_size, &src_io);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s source map failed status=0x%x src_res=0x%x ctx=%u\n",
+                  __FUNCTION__, status, m_cpuCopySrc->GetId(), ctx_id));
+        return status;
+    }
+
+    status = m_cpuCopyDst->MapForCpuCopy(ctx_id, &dst_va,
+                                         &dst_map_size, &dst_io);
+    if (!NT_SUCCESS(status))
+    {
+        m_cpuCopySrc->UnmapForCpuCopy(src_va, src_map_size, src_io);
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s destination map failed status=0x%x dst_res=0x%x ctx=%u\n",
+                  __FUNCTION__, status, m_cpuCopyDst->GetId(), ctx_id));
+        return status;
+    }
+
+    m_cpuCopySrcVa = src_va;
+    m_cpuCopyDstVa = dst_va;
+    m_cpuCopySrcMapSize = src_map_size;
+    m_cpuCopyDstMapSize = dst_map_size;
+    m_cpuCopySrcIo = src_io;
+    m_cpuCopyDstIo = dst_io;
+    m_cpuCopyBltMapped = TRUE;
+
+    DbgPrint(TRACE_LEVEL_VERBOSE,
+             ("%s mapped Venus BLT present ctx=%u src_res=0x%x dst_res=0x%x src_va=%p dst_va=%p src_size=0x%llx dst_size=0x%llx src_io=%u dst_io=%u\n",
+              __FUNCTION__, ctx_id, m_cpuCopySrc->GetId(), m_cpuCopyDst->GetId(),
+              src_va, dst_va, src_map_size, dst_map_size,
+              src_io ? 1 : 0, dst_io ? 1 : 0));
+
+    return STATUS_SUCCESS;
+}
+
+// Copy one destination-space region for a CPU blt, mapping it back to source
+// space with the (dx,dy) blt offset and validating every access against the
+// mapped sizes.  Degenerate or out-of-bounds regions are skipped (returns 0)
+// rather than failing the whole present, so a single bad sub-rect cannot drop
+// an entire frame.  Returns the number of bytes copied.
+static ULONGLONG VioGpuBltCopyRegion(VioGpuCommand *cmd,
+                                     VioGpuAllocation *src,
+                                     VioGpuAllocation *dst,
+                                     PUCHAR src_va, ULONGLONG src_map_size,
+                                     PUCHAR dst_va, ULONGLONG dst_map_size,
+                                     const RECT *clampRect,
+                                     LONG dx, LONG dy,
+                                     UINT bpp,
+                                     UINT src_stride, UINT dst_stride,
+                                     VIOGPU_BLT_COPY_MODE copy_mode,
+                                     const RECT *region)
+{
+    // Clip the requested region to the destination blt rectangle.
+    LONG rl = max(region->left, clampRect->left);
+    LONG rt = max(region->top, clampRect->top);
+    LONG rr = min(region->right, clampRect->right);
+    LONG rb = min(region->bottom, clampRect->bottom);
+    if (rr <= rl || rb <= rt)
+    {
+        return 0;
+    }
+
+    const LONG sl = rl + dx;
+    const LONG st = rt + dy;
+    if (rl < 0 || rt < 0 || sl < 0 || st < 0)
+    {
+        return 0;
+    }
+
+    // Clip the copy extent to both surfaces (no stretch).
+    LONG w = rr - rl;
+    LONG h = rb - rt;
+    if ((LONG)dst->GetWidth() - rl < w)
+    {
+        w = (LONG)dst->GetWidth() - rl;
+    }
+    if ((LONG)src->GetWidth() - sl < w)
+    {
+        w = (LONG)src->GetWidth() - sl;
+    }
+    if ((LONG)dst->GetHeight() - rt < h)
+    {
+        h = (LONG)dst->GetHeight() - rt;
+    }
+    if ((LONG)src->GetHeight() - st < h)
+    {
+        h = (LONG)src->GetHeight() - st;
+    }
+    if (w <= 0 || h <= 0)
+    {
+        return 0;
+    }
+
+    const SIZE_T row_bytes = (SIZE_T)w * bpp;
+    if (row_bytes > src_stride || row_bytes > dst_stride)
+    {
+        return 0;
+    }
+
+    const ULONGLONG src_offset =
+        (ULONGLONG)st * src_stride + (ULONGLONG)sl * bpp;
+    const ULONGLONG dst_offset =
+        (ULONGLONG)rt * dst_stride + (ULONGLONG)rl * bpp;
+    const ULONGLONG src_required =
+        src_offset + (ULONGLONG)(h - 1) * src_stride + row_bytes;
+    const ULONGLONG dst_required =
+        dst_offset + (ULONGLONG)(h - 1) * dst_stride + row_bytes;
+    if (src_required > src_map_size || dst_required > dst_map_size)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s bounds skip src_res=0x%x dst_res=0x%x src_required=0x%llx src_size=0x%llx dst_required=0x%llx dst_size=0x%llx row=0x%llx height=%ld fence=%u\n",
+                  __FUNCTION__, src->GetId(), dst->GetId(),
+                  src_required, src_map_size, dst_required, dst_map_size,
+                  (ULONGLONG)row_bytes, h, cmd->GetSubmissionFenceId()));
+        return 0;
+    }
+
+    PUCHAR s = src_va + src_offset;
+    PUCHAR d = dst_va + dst_offset;
+    for (LONG y = 0; y < h; y++)
+    {
+        PUCHAR src_row = s + (ULONGLONG)y * src_stride;
+        PUCHAR dst_row = d + (ULONGLONG)y * dst_stride;
+
+        if (copy_mode == VIOGPU_BLT_COPY_DIRECT)
+        {
+            RtlCopyMemory(dst_row, src_row, row_bytes);
+        }
+        else
+        {
+            const ULONG *src_pixel = (const ULONG *)src_row;
+            ULONG *dst_pixel = (ULONG *)dst_row;
+            for (LONG x = 0; x < w; x++)
+            {
+                dst_pixel[x] = VioGpuBltSwapRedBlue(src_pixel[x]);
+            }
+        }
+    }
+
+    return (ULONGLONG)row_bytes * h;
+}
+
+static NTSTATUS VioGpuCpuCopyBltPresent(VioGpuCommand *cmd,
+                                        VioGpuAllocation *src,
+                                        VioGpuAllocation *dst,
+                                        const RECT *srcRect,
+                                        const RECT *dstRect,
+                                        PVOID src_va,
+                                        ULONGLONG src_map_size,
+                                        PVOID dst_va,
+                                        ULONGLONG dst_map_size,
+                                        const RECT *subRects,
+                                        UINT subRectCnt)
+{
+    if (!cmd || !src || !dst || !srcRect || !dstRect || !src_va || !dst_va)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!src->IsBlob() || dst->IsBlob())
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    const LONG src_width = srcRect->right - srcRect->left;
+    const LONG src_height = srcRect->bottom - srcRect->top;
+    const LONG dst_width = dstRect->right - dstRect->left;
+    const LONG dst_height = dstRect->bottom - dstRect->top;
+    if (srcRect->left < 0 || srcRect->top < 0 ||
+        dstRect->left < 0 || dstRect->top < 0 ||
+        src_width <= 0 || src_height <= 0 ||
+        dst_width <= 0 || dst_height <= 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    const UINT bpp = VioGpuBltBytesPerPixel(dst->GetFormat());
+    const UINT src_stride = src->GetStride();
+    const UINT dst_stride = dst->GetStride();
+    const VIOGPU_BLT_COPY_MODE copy_mode =
+        VioGpuBltCopyMode(src->GetFormat(), dst->GetFormat());
+    const LONG dx = srcRect->left - dstRect->left;
+    const LONG dy = srcRect->top - dstRect->top;
+
+    if (copy_mode == VIOGPU_BLT_COPY_UNSUPPORTED)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s WARNING Venus/Yttrium BLT conversion unavailable owner=viogpu3d reason=unsupported_format_pair src_res=0x%x dst_res=0x%x src_format=%u dst_format=%u\n",
+                  __FUNCTION__, src->GetId(), dst->GetId(),
+                  src->GetFormat(), dst->GetFormat()));
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    // Copy or convert each dirty region directly into the destination so
+    // conversion adds no extra pass.
+    LARGE_INTEGER frequency = {};
+    const LARGE_INTEGER start = KeQueryPerformanceCounter(&frequency);
+    ULONGLONG bytes_copied = 0;
+    UINT regions_copied = 0;
+    if (subRectCnt == 0)
+    {
+        bytes_copied += VioGpuBltCopyRegion(cmd, src, dst, (PUCHAR)src_va,
+                                            src_map_size, (PUCHAR)dst_va,
+                                            dst_map_size, dstRect, dx, dy, bpp,
+                                            src_stride, dst_stride, copy_mode,
+                                            dstRect);
+        regions_copied = bytes_copied ? 1 : 0;
+    }
+    else
+    {
+        for (UINT i = 0; i < subRectCnt; i++)
+        {
+            ULONGLONG n = VioGpuBltCopyRegion(cmd, src, dst, (PUCHAR)src_va,
+                                              src_map_size, (PUCHAR)dst_va,
+                                              dst_map_size, dstRect, dx, dy, bpp,
+                                              src_stride, dst_stride, copy_mode,
+                                              &subRects[i]);
+            if (n)
+            {
+                bytes_copied += n;
+                regions_copied++;
+            }
+        }
+    }
+    const LARGE_INTEGER end = KeQueryPerformanceCounter(NULL);
+    ULONGLONG duration_us = 0;
+    if (frequency.QuadPart > 0 && end.QuadPart >= start.QuadPart)
+    {
+        duration_us =
+            ((ULONGLONG)(end.QuadPart - start.QuadPart) * 1000000ull) /
+            (ULONGLONG)frequency.QuadPart;
+    }
+
+    DbgPrint(TRACE_LEVEL_VERBOSE,
+             ("%s copied Venus BLT present fence=%u src_res=0x%x dst_res=0x%x src_format=%u dst_format=%u copy_mode=%u subrects=%u regions=%u bytes=0x%llx src_stride=%u dst_stride=%u duration_us=%llu\n",
+              __FUNCTION__, cmd->GetSubmissionFenceId(), src->GetId(),
+              dst->GetId(), src->GetFormat(), dst->GetFormat(), copy_mode,
+              subRectCnt, regions_copied, bytes_copied, src_stride, dst_stride,
+              duration_us));
+
+    return regions_copied ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+}
+
 static UINT CountDmaCompletionPackets(char *command, char *end, UINT fenceId, BOOLEAN *valid)
 {
     UINT packets = 0;
@@ -235,6 +708,41 @@ void VioGpuCommand::Run()
     // completions and the final VioGpuCommandDone() at the end of Run() retire
     // them, and the last decrement to zero frees the command.
     InterlockedIncrement(&m_done);
+
+    if (m_cpuCopyBlt && m_cpuCopyBltMapped)
+    {
+        NTSTATUS copyStatus =
+            VioGpuCpuCopyBltPresent(this, m_cpuCopySrc,
+                                    m_cpuCopyDst, &m_cpuCopySrcRect,
+                                    &m_cpuCopyDstRect,
+                                    m_cpuCopySrcVa,
+                                    m_cpuCopySrcMapSize,
+                                    m_cpuCopyDstVa,
+                                    m_cpuCopyDstMapSize,
+                                    m_cpuCopySubRects,
+                                    m_cpuCopySubRectCnt);
+        if (!NT_SUCCESS(copyStatus))
+        {
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("%s Venus/Yttrium BLT CPU-copy failed in SubmitCommand status=0x%x fence=%u src_res=0x%x dst_res=0x%x\n",
+                      __FUNCTION__,
+                      copyStatus,
+                      m_FenceId,
+                      m_cpuCopySrc ? m_cpuCopySrc->GetId() : 0,
+                      m_cpuCopyDst ? m_cpuCopyDst->GetId() : 0));
+        }
+        ClearCpuCopyBlt();
+    }
+    else if (m_cpuCopyBlt)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s Venus/Yttrium BLT CPU-copy reached SubmitCommand without mapped pointers fence=%u src_res=0x%x dst_res=0x%x\n",
+                  __FUNCTION__,
+                  m_FenceId,
+                  m_cpuCopySrc ? m_cpuCopySrc->GetId() : 0,
+                  m_cpuCopyDst ? m_cpuCopyDst->GetId() : 0));
+        ClearCpuCopyBlt();
+    }
 
     if (!m_pCommand || !m_pEnd || m_pCommand >= m_pEnd)
     {
@@ -649,6 +1157,8 @@ void VioGpuCommand::VioGpuCommandDone()
         m_pPrivateDataSlot = NULL;
     }
 
+    ClearCpuCopyBlt();
+
     delete this;
 }
 
@@ -671,7 +1181,38 @@ NTSTATUS VioGpuCommander::Patch(const DXGKARG_PATCH *pPatch)
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s \n", __FUNCTION__));
 
-    UNREFERENCED_PARAMETER(pPatch);
+    if (!pPatch)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    VioGpuCommand *cmd = NULL;
+    if (pPatch->pDmaBufferPrivateData &&
+        pPatch->DmaBufferPrivateDataSize >= sizeof(VioGpuCommand *))
+    {
+        VioGpuCommand **slot =
+            (VioGpuCommand **)pPatch->pDmaBufferPrivateData;
+        cmd = *slot;
+    }
+
+    if (!cmd)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    VioGpuDevice *context = reinterpret_cast<VioGpuDevice *>(pPatch->hContext);
+    ULONG ctx_id = context ? context->GetId() : 0;
+    NTSTATUS status = cmd->MapCpuCopyBlt(ctx_id);
+    if (status != STATUS_NOT_FOUND && !NT_SUCCESS(status))
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("%s Venus/Yttrium BLT CPU-copy map failed in Patch status=0x%x ctx=%u fence=%u priv=%p\n",
+                  __FUNCTION__,
+                  status,
+                  ctx_id,
+                  pPatch->SubmissionFenceId,
+                  pPatch->pDmaBufferPrivateData));
+    }
 
     return STATUS_SUCCESS;
 }

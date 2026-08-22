@@ -699,6 +699,36 @@ VioGpu3DPresent(_In_ CONST HANDLE hDevice, _Inout_ DXGKARG_PRESENT *pPresent)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
     VioGpuDevice *pDxContext = reinterpret_cast<VioGpuDevice *>(hDevice);
+    static volatile LONG presentLogCount;
+    const LONG presentCount = InterlockedIncrement(&presentLogCount);
+    {
+        DXGK_ALLOCATIONLIST *dxgkSrc =
+            pPresent && pPresent->pAllocationList ? &pPresent->pAllocationList[DXGK_PRESENT_SOURCE_INDEX] : NULL;
+        DXGK_ALLOCATIONLIST *dxgkDst =
+            pPresent && pPresent->pAllocationList ? &pPresent->pAllocationList[DXGK_PRESENT_DESTINATION_INDEX] : NULL;
+
+        DbgPrint(TRACE_LEVEL_VERBOSE,
+                 ("VioGpu3DPresent entry count=%ld irql=%u hDevice=%p ctx=%u capset=%u owner=%p "
+                  "flags blt=%u flip=%u flip_no_wait=%u color_fill=%u rotate=%u "
+                  "dma=%p dma_size=%u alloc_list=%p src_hdev=%p dst_hdev=%p\n",
+                  presentCount,
+                  (UINT)KeGetCurrentIrql(),
+                  hDevice,
+                  pDxContext->GetId(),
+                  pDxContext->GetCapsetId(),
+                  pDxContext->GetOwnerProcessId(),
+                  pPresent && pPresent->Flags.Blt ? 1 : 0,
+                  pPresent && pPresent->Flags.Flip ? 1 : 0,
+                  pPresent && pPresent->Flags.FlipWithNoWait ? 1 : 0,
+                  pPresent && pPresent->Flags.ColorFill ? 1 : 0,
+                  pPresent && pPresent->Flags.Rotate ? 1 : 0,
+                  pPresent ? pPresent->pDmaBuffer : NULL,
+                  pPresent ? pPresent->DmaSize : 0,
+                  pPresent ? pPresent->pAllocationList : NULL,
+                  dxgkSrc ? dxgkSrc->hDeviceSpecificAllocation : NULL,
+                  dxgkDst ? dxgkDst->hDeviceSpecificAllocation : NULL));
+    }
+
     return pDxContext->Present(pPresent);
 }
 

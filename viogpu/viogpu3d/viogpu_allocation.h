@@ -86,6 +86,10 @@ class VioGpuAllocation
     {
         return m_blob_created;
     }
+    bool HasCpuCopyBacking() const
+    {
+        return m_is_blob ? m_blob_kernel_va != NULL : m_cpu_copy_va != NULL;
+    }
     bool IsBlobPending() const
     {
         return (m_blob_create_state == 1);
@@ -122,6 +126,8 @@ class VioGpuAllocation
     NTSTATUS EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap, VioGpuDevice *device);
     NTSTATUS EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *resUnmap, VioGpuDevice *device);
     NTSTATUS EscapeResourceSetScanoutBlob(VIOGPU_RES_SET_SCANOUT_BLOB_REQ *resScanout);
+    NTSTATUS MapForCpuCopy(ULONG ctx_id, PVOID *map_va, ULONGLONG *map_size, BOOLEAN *io_mapping);
+    void UnmapForCpuCopy(PVOID map_va, ULONGLONG map_size, BOOLEAN io_mapping);
 
   private:
     static void BlobCreateCompleteCB(void *ctx_void);
@@ -155,6 +161,8 @@ class VioGpuAllocation
     bool m_blob_shmem_allocated;
     ULONG m_blob_map_info;
     bool m_blob_mapped;
+    PVOID m_blob_kernel_va;
+    ULONGLONG m_blob_kernel_map_size;
     bool m_blob_created;
     NTSTATUS m_blob_create_status;
     volatile LONG m_blob_create_state;
@@ -168,6 +176,9 @@ class VioGpuAllocation
     MDL *m_pMDL;
     size_t m_pageCount;
     size_t m_pageOffset;
+    FAST_MUTEX m_cpu_copy_mutex;
+    PVOID m_cpu_copy_va;
+    ULONGLONG m_cpu_copy_map_size;
 
     size_t m_DxPhysicalAddress;
 

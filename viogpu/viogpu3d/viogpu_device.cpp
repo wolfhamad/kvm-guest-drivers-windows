@@ -43,6 +43,27 @@ VioGpuDevice::~VioGpuDevice()
     }
 }
 
+static NTSTATUS VioGpuEmitPresentNop(DXGKARG_PRESENT *pPresent)
+{
+    if (!pPresent->pDmaBuffer)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    if (pPresent->DmaSize < sizeof(VIOGPU_COMMAND_HDR))
+    {
+        return STATUS_INVALID_USER_BUFFER;
+    }
+
+    VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)pPresent->pDmaBuffer;
+    cmd_hdr->type = VIOGPU_CMD_NOP;
+    cmd_hdr->size = 0;
+    pPresent->pDmaBuffer = (char *)pPresent->pDmaBuffer + sizeof(VIOGPU_COMMAND_HDR);
+
+    return STATUS_SUCCESS;
+}
+
+
 NTSTATUS VioGpuDevice::Init(VIOGPU_CTX_INIT_REQ *pOptions)
 {
     PAGED_CODE();
@@ -193,6 +214,19 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     DXGK_ALLOCATIONLIST *dxgk_dst =
         pPresent->pAllocationList ? &pPresent->pAllocationList[DXGK_PRESENT_DESTINATION_INDEX] : NULL;
 
+    VioGpuAllocation *vensrc = NULL;
+    VioGpuAllocation *vendst = NULL;
+
+    if (dxgk_src && dxgk_src->hDeviceSpecificAllocation != NULL)
+    {
+        vensrc = reinterpret_cast<VioGpuDeviceAllocation *>(dxgk_src->hDeviceSpecificAllocation)->GetAllocation();
+    }
+
+    if (dxgk_dst != NULL && dxgk_dst->hDeviceSpecificAllocation != NULL)
+    {
+        vendst = reinterpret_cast<VioGpuDeviceAllocation *>(dxgk_dst->hDeviceSpecificAllocation)->GetAllocation();
+    }
+
     if (pPresent->Flags.Flip || pPresent->Flags.FlipWithNoWait)
     {
         if (pPresent->pDmaBuffer &&
@@ -339,6 +373,47 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
 
     if (pPresent->Flags.Blt)
     {
+        if (IsVenusContext())
+        {
+            NTSTATUS stageStatus =
+                cmd->SetCpuCopyBlt(src, dst, &pPresent->SrcRect,
+                                   &pPresent->DstRect,
+                                   pPresent->pDstSubRects,
+                                   pPresent->SubRectCnt);
+            if (!NT_SUCCESS(stageStatus))
+            {
+                DbgPrint(TRACE_LEVEL_WARNING,
+                         ("%s Venus/Yttrium BLT CPU-copy setup failed status=0x%x ctx=0x%x src_res=0x%x dst_res=0x%x\n",
+                          __FUNCTION__,
+                          stageStatus,
+                          m_id,
+                          src ? src->GetId() : 0,
+                          dst ? dst->GetId() : 0));
+            }
+            else if (src && dst &&
+                     src->HasCpuCopyBacking() &&
+                     dst->HasCpuCopyBacking())
+            {
+                NTSTATUS mapStatus = cmd->MapCpuCopyBlt(m_id);
+                if (!NT_SUCCESS(mapStatus) && mapStatus != STATUS_NOT_FOUND)
+                {
+                    DbgPrint(TRACE_LEVEL_WARNING,
+                             ("%s Venus/Yttrium BLT CPU-copy resident map failed status=0x%x ctx=0x%x src_res=0x%x dst_res=0x%x\n",
+                              __FUNCTION__,
+                              mapStatus,
+                              m_id,
+                              src ? src->GetId() : 0,
+                              dst ? dst->GetId() : 0));
+                }
+            }
+            NTSTATUS status = VioGpuEmitPresentNop(pPresent);
+            if (!NT_SUCCESS(status))
+            {
+                delete cmd;
+            }
+            return status;
+        }
+
         if (pPresent->pDmaBuffer && dst && src)
         {
             NTSTATUS status = GenerateBltPresent(pPresent, src, dst);
@@ -351,12 +426,10 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     }
     else
     {
-        if (pPresent->pDmaBuffer)
+        NTSTATUS status = VioGpuEmitPresentNop(pPresent);
+        if (!NT_SUCCESS(status))
         {
-            VIOGPU_COMMAND_HDR *cmd_hdr = (VIOGPU_COMMAND_HDR *)pPresent->pDmaBuffer;
-            cmd_hdr->type = VIOGPU_CMD_NOP;
-            cmd_hdr->size = 0;
-            pPresent->pDmaBuffer = (char *)pPresent->pDmaBuffer + sizeof(VIOGPU_COMMAND_HDR);
+            return status;
         }
 
         DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s Unsupported PRESENT\n", __FUNCTION__));

@@ -104,6 +104,8 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     m_blob_shmem_allocated = false;
     m_blob_map_info = 0;
     m_blob_mapped = false;
+    m_blob_kernel_va = NULL;
+    m_blob_kernel_map_size = 0;
     m_blob_created = false;
     m_blob_create_status = STATUS_PENDING;
     m_blob_create_state = 0;
@@ -123,6 +125,9 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     m_pMDL = NULL;
     m_pageCount = 0;
     m_pageOffset = 0;
+    ExInitializeFastMutex(&m_cpu_copy_mutex);
+    m_cpu_copy_va = NULL;
+    m_cpu_copy_map_size = 0;
     m_DxPhysicalAddress = 0;
 
     KeInitializeEvent(&m_busyNotification, NotificationEvent, TRUE);
@@ -329,6 +334,13 @@ VioGpuAllocation::~VioGpuAllocation(void)
 
     const bool resource_created = m_is_blob ? m_blob_created : (m_resource_created != 0);
 
+    if (m_blob_kernel_va && m_blob_kernel_map_size)
+    {
+        MmUnmapIoSpace(m_blob_kernel_va, (SIZE_T)m_blob_kernel_map_size);
+        m_blob_kernel_va = NULL;
+        m_blob_kernel_map_size = 0;
+    }
+
     if (resource_created && m_is_blob && m_blob_mapped)
     {
         m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);
@@ -357,6 +369,27 @@ void VioGpuAllocation::AttachBacking(MDL *pMDL, size_t pageCount, size_t pageOff
     m_pMDL = pMDL;
     m_pageCount = pageCount;
     m_pageOffset = pageOffset;
+    ExAcquireFastMutex(&m_cpu_copy_mutex);
+    m_cpu_copy_va = NULL;
+    m_cpu_copy_map_size = 0;
+    if (!m_is_blob && m_pMDL && m_pageCount)
+    {
+        PVOID base_va =
+            MmGetSystemAddressForMdlSafe(m_pMDL,
+                                         NormalPagePriority | MdlMappingNoExecute);
+        if (base_va)
+        {
+            m_cpu_copy_va = (PUCHAR)base_va + (m_pageOffset * PAGE_SIZE);
+            m_cpu_copy_map_size = (ULONGLONG)m_pageCount * PAGE_SIZE;
+        }
+        else
+        {
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("%s MmGetSystemAddressForMdlSafe failed res_id=0x%x mdl=%p\n",
+                      __FUNCTION__, m_Id, m_pMDL));
+        }
+    }
+    ExReleaseFastMutex(&m_cpu_copy_mutex);
 
     GPU_MEM_ENTRY *ents = new (NonPagedPoolNx) GPU_MEM_ENTRY[pageCount];
 
@@ -375,12 +408,123 @@ void VioGpuAllocation::DetachBacking()
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=%d\n", __FUNCTION__, m_Id));
 
+    ExAcquireFastMutex(&m_cpu_copy_mutex);
+    m_cpu_copy_va = NULL;
+    m_cpu_copy_map_size = 0;
     m_pMDL = NULL;
     m_pageCount = 0;
     m_pageOffset = 0;
+    ExReleaseFastMutex(&m_cpu_copy_mutex);
 
     m_adapter->ctrlQueue.DetachBacking(m_Id);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+}
+
+NTSTATUS VioGpuAllocation::MapForCpuCopy(ULONG ctx_id,
+                                         PVOID *map_va,
+                                         ULONGLONG *map_size,
+                                         BOOLEAN *io_mapping)
+{
+    PAGED_CODE();
+
+    if (!map_va || !map_size || !io_mapping)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    *map_va = NULL;
+    *map_size = 0;
+    *io_mapping = FALSE;
+
+    if (m_is_blob)
+    {
+        NTSTATUS status = EnsureBlobCreatedAndWait(ctx_id);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+
+        if (!(m_blob_flags & VIRTGPU_BLOB_FLAG_USE_MAPPABLE))
+        {
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        const ULONGLONG map_len = ALIGN_UP_BY(m_blob_size, PAGE_SIZE);
+        const ULONGLONG shmem_len = m_adapter->GetShmemLen();
+        if (!map_len || m_blob_offset > shmem_len ||
+            map_len > (shmem_len - m_blob_offset))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        ExAcquireFastMutex(&m_blob_map_mutex);
+        if (!m_blob_mapped)
+        {
+            if (!m_adapter->ctrlQueue.ResourceMapBlob(m_Id, m_blob_offset,
+                                                      &m_blob_map_info))
+            {
+                ExReleaseFastMutex(&m_blob_map_mutex);
+                return STATUS_UNSUCCESSFUL;
+            }
+            m_blob_mapped = true;
+        }
+
+        if (!m_blob_kernel_va)
+        {
+            PHYSICAL_ADDRESS shmem_pa = {};
+            if (!m_adapter->GetShmemCpuTranslatedAddress(&shmem_pa))
+            {
+                ExReleaseFastMutex(&m_blob_map_mutex);
+                return STATUS_NOT_SUPPORTED;
+            }
+            shmem_pa.QuadPart += m_blob_offset;
+
+            // Match the host and user mappings to avoid conflicting cache aliases.
+            const MEMORY_CACHING_TYPE cache_type =
+                VioGpuCacheTypeFromMapInfo(m_blob_map_info);
+            DbgPrint(TRACE_LEVEL_VERBOSE,
+                     ("%s kernel map res_id=0x%x map_info=0x%x cache_type=0x%x\n",
+                      __FUNCTION__, m_Id, m_blob_map_info, cache_type));
+            PVOID va = MmMapIoSpace(shmem_pa, (SIZE_T)map_len, cache_type);
+            if (!va)
+            {
+                ExReleaseFastMutex(&m_blob_map_mutex);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            m_blob_kernel_va = va;
+            m_blob_kernel_map_size = map_len;
+        }
+
+        *map_va = m_blob_kernel_va;
+        *map_size = m_blob_kernel_map_size;
+        *io_mapping = FALSE;
+        ExReleaseFastMutex(&m_blob_map_mutex);
+        return STATUS_SUCCESS;
+    }
+
+    ExAcquireFastMutex(&m_cpu_copy_mutex);
+    if (!m_cpu_copy_va || !m_cpu_copy_map_size)
+    {
+        ExReleaseFastMutex(&m_cpu_copy_mutex);
+        return STATUS_NOT_MAPPED_DATA;
+    }
+
+    *map_va = m_cpu_copy_va;
+    *map_size = m_cpu_copy_map_size;
+    *io_mapping = FALSE;
+    ExReleaseFastMutex(&m_cpu_copy_mutex);
+    return STATUS_SUCCESS;
+}
+
+void VioGpuAllocation::UnmapForCpuCopy(PVOID map_va,
+                                       ULONGLONG map_size,
+                                       BOOLEAN io_mapping)
+{
+    if (io_mapping && map_va && map_size)
+    {
+        MmUnmapIoSpace(map_va, (SIZE_T)map_size);
+    }
 }
 
 void VioGpuAllocation::MarkBusy()
@@ -405,8 +549,9 @@ void VioGpuAllocation::UnmarkBusy()
 
 void VioGpuAllocation::FlushToScreen(UINT scan_id)
 {
+    UINT offset = m_is_blob ? GetScanoutOffset() : 0;
     FlushToScreen(scan_id, m_options.width, m_options.height, 0, 0,
-                  m_options.format, GetStride(), 0);
+                  m_options.format, GetStride(), offset);
 }
 
 void VioGpuAllocation::FlushToScreen(UINT scan_id,
@@ -963,16 +1108,35 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
         m_blob_mapped = true;
     }
 
-    cache_type = VioGpuCacheTypeFromMapInfo(m_blob_map_info);
+    const MEMORY_CACHING_TYPE host_cache_type =
+        VioGpuCacheTypeFromMapInfo(m_blob_map_info);
+
+    /*
+     * Honour the host-reported cache type.  The host reports write-combined,
+     * which is fine for the writes the upload paths do but leaves every CPU
+     * read uncached, and that is expensive: the UMD's draw-time index scan
+     * measured ~142 ns per element, and a bulk copy of the same range reached
+     * only ~21 MB/s.  Overriding this to MmCached made Sanctuary's D3D10 path
+     * 5.4x faster (1.5 -> 8.1 fps) and left vertex/index data intact, but it
+     * corrupted the display for every UMD client including DWM - striped,
+     * partially stale scanlines, the signature of the guest mapping pages
+     * write-back while the host maps them write-combined, which x86 does not
+     * make coherent.  map_info is the host telling us the attribute it is
+     * using; do not override it here.  Win back the read cost by not reading
+     * this memory per draw instead (cache index bounds, or scan the frontend's
+     * buffer_shadow).  Tried and reverted 2026-08-01.
+     */
+    cache_type = host_cache_type;
 
     PHYSICAL_ADDRESS map_pa = shmem_pa;
     map_pa.QuadPart += m_blob_offset;
     DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("%s map_pa=0x%llx map_len=0x%llx cache_type=0x%x shmem_pa=0x%llx shmem_len=0x%llx blob_offset=0x%llx\n",
+             ("%s map_pa=0x%llx map_len=0x%llx cache_type=0x%x host_cache_type=0x%x shmem_pa=0x%llx shmem_len=0x%llx blob_offset=0x%llx\n",
               __FUNCTION__,
               map_pa.QuadPart,
               map_len,
               cache_type,
+              host_cache_type,
               shmem_pa.QuadPart,
               shmem_len,
               m_blob_offset));
@@ -1062,7 +1226,7 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
                   map_pa.QuadPart,
                   map_len,
                   cache_type));
-        if (m_blob_map_user_refs == 0 && m_blob_mapped)
+        if (m_blob_map_user_refs == 0 && m_blob_mapped && !m_blob_kernel_va)
         {
             m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);
             m_blob_mapped = false;
@@ -1077,7 +1241,7 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
     {
         dxgk->DxgkCbUnmapMemory(dxgk->DeviceHandle, user_va);
 
-        if (m_blob_map_user_refs == 0 && m_blob_mapped)
+        if (m_blob_map_user_refs == 0 && m_blob_mapped && !m_blob_kernel_va)
         {
             m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);
             m_blob_mapped = false;
@@ -1172,7 +1336,7 @@ NTSTATUS VioGpuAllocation::EscapeResourceUnmapBlob(VIOGPU_RES_UNMAP_BLOB_REQ *re
         delete map;
     }
 
-    if (m_blob_map_user_refs == 0 && m_blob_mapped)
+    if (m_blob_map_user_refs == 0 && m_blob_mapped && !m_blob_kernel_va)
     {
         DbgPrint(TRACE_LEVEL_VERBOSE, ("%s ResourceUnmapBlob res_id=0x%x\n", __FUNCTION__, m_Id));
         m_adapter->ctrlQueue.ResourceUnmapBlob(m_Id);

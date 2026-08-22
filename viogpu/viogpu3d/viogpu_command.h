@@ -38,6 +38,14 @@ class VioGpuCommand
         m_pPrivateDataSlot = slot;
     }
 
+    NTSTATUS SetCpuCopyBlt(VioGpuAllocation *src,
+                           VioGpuAllocation *dst,
+                           const RECT *srcRect,
+                           const RECT *dstRect,
+                           const RECT *subRects,
+                           UINT subRectCnt);
+    NTSTATUS MapCpuCopyBlt(ULONG ctx_id);
+
     NTSTATUS AttachAllocations(DXGK_ALLOCATIONLIST *allocationList, UINT allocationListLength);
 
     UINT GetSubmissionFenceId() const
@@ -79,6 +87,27 @@ class VioGpuCommand
     BOOLEAN m_submitPaging = FALSE;
     UINT m_submitFlagsValue = 0;
     LONG m_dmaNotified = 0;
+    BOOLEAN m_cpuCopyBlt = FALSE;
+    BOOLEAN m_cpuCopyBltMapped = FALSE;
+    RECT m_cpuCopySrcRect = {};
+    RECT m_cpuCopyDstRect = {};
+    // Dirty sub-rectangles (destination space). When m_cpuCopySubRectCnt == 0
+    // the whole src/dst rect intersection is copied. When more than
+    // VIOGPU_BLT_MAX_SUBRECTS are supplied they collapse to a single bounding
+    // rect (index 0, count 1) so the storage stays bounded.
+    static const UINT VIOGPU_BLT_MAX_SUBRECTS = 64;
+    RECT m_cpuCopySubRects[VIOGPU_BLT_MAX_SUBRECTS] = {};
+    UINT m_cpuCopySubRectCnt = 0;
+    VioGpuAllocation *m_cpuCopySrc = NULL;
+    VioGpuAllocation *m_cpuCopyDst = NULL;
+    PVOID m_cpuCopySrcVa = NULL;
+    PVOID m_cpuCopyDstVa = NULL;
+    ULONGLONG m_cpuCopySrcMapSize = 0;
+    ULONGLONG m_cpuCopyDstMapSize = 0;
+    BOOLEAN m_cpuCopySrcIo = FALSE;
+    BOOLEAN m_cpuCopyDstIo = FALSE;
+
+    void ClearCpuCopyBlt();
 
     VioGpuAllocation **m_allocations;
     UINT m_allocationsLength;
