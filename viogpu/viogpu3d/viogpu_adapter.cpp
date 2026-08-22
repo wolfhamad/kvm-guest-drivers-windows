@@ -1799,9 +1799,13 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
             status = STATUS_UNSUCCESSFUL;
             break;
         }
-#if (NTDDI_VERSION >= NTDDI_WIN10)
-        AckFeature(VIRTIO_F_ACCESS_PLATFORM);
-#endif
+        // Ctrl-queue buffers are currently described with CPU physical
+        // addresses. Do not negotiate ACCESS_PLATFORM until those buffers use
+        // DMA-remapping-safe addresses. /akre
+        #if (NTDDI_VERSION >= NTDDI_WIN10)
+        //AckFeature(VIRTIO_F_ACCESS_PLATFORM);
+        #endif
+
 
         if (!AckFeature(VIRTIO_F_VERSION_1))
         {
