@@ -54,6 +54,20 @@ VioGpuCommand::VioGpuCommand(VioGpuAdapter *adapter)
     m_allocationsLength = 0;
 };
 
+VioGpuCommand::~VioGpuCommand()
+{
+    // A command can be destroyed by a direct `delete` on an error/early-exit
+    // path (e.g. a failed Blt Present) without going through VioGpuCommandDone().
+    // If it was stashed in a DMA-buffer private-data slot, clear the slot so a
+    // later SubmitCommand cannot pull this freed pointer out of it (UAF).
+    // CompareExchange so the slot is only NULLed if it still points at us.
+    if (m_pPrivateDataSlot)
+    {
+        InterlockedCompareExchangePointer((PVOID volatile *)m_pPrivateDataSlot, NULL, this);
+        m_pPrivateDataSlot = NULL;
+    }
+}
+
 static BOOLEAN IsExpectedEmptySubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 {
     if (pSubmitCommand->DmaBufferSubmissionEndOffset <
@@ -96,6 +110,8 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s", __FUNCTION__));
 
+    // The base reference is taken in Run(); reset the retirement/notification
+    // counters for this submission.
     InterlockedExchange(&m_done, 0);
     InterlockedExchange(&m_isrPendingPackets, 0);
     InterlockedExchange(&m_dmaNotified, 0);
@@ -123,7 +139,7 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
     m_pContext = reinterpret_cast<VioGpuDevice *>(pSubmitCommand->hContext);
 
     DbgPrint(TRACE_LEVEL_VERBOSE,
-             ("%s cmd=%p fence=%u node=%u engine=%u hContext=%p ctx_id=%u dma=%p start=0x%x end=0x%x priv=%p\n",
+             ("%s cmd=%p fence=%u node=%u engine=%u hContext=%p ctx_id=%u dma=%p start=0x%x end=0x%x\n",
               __FUNCTION__,
               this,
               m_FenceId,
@@ -133,8 +149,7 @@ void VioGpuCommand::PrepareSubmit(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
               m_pContext ? m_pContext->GetId() : 0,
               m_pDmaBuffer,
               pSubmitCommand->DmaBufferSubmissionStartOffset,
-              pSubmitCommand->DmaBufferSubmissionEndOffset,
-              pSubmitCommand->pDmaBufferPrivateData));
+              pSubmitCommand->DmaBufferSubmissionEndOffset));
 }
 
 static UINT CountDmaCompletionPackets(char *command, char *end, UINT fenceId, BOOLEAN *valid)
@@ -215,6 +230,10 @@ void VioGpuCommand::Run()
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
 
+    // Base reference for this submission. Each packet submitted in the loop
+    // below takes its own reference (InterlockedIncrement); the matching ISR
+    // completions and the final VioGpuCommandDone() at the end of Run() retire
+    // them, and the last decrement to zero frees the command.
     InterlockedIncrement(&m_done);
 
     if (!m_pCommand || !m_pEnd || m_pCommand >= m_pEnd)
@@ -635,7 +654,8 @@ void VioGpuCommand::VioGpuCommandDone()
 
 #pragma code_seg(pop)
 
-PAGED_CODE_SEG_BEGIN
+#pragma code_seg(push)
+#pragma code_seg()
 
 VioGpuCommander::VioGpuCommander(VioGpuAdapter *pAdapter)
 {
@@ -663,6 +683,12 @@ PAGED_CODE_SEG_END
 NTSTATUS VioGpuCommander::SubmitCommand(const DXGKARG_SUBMITCOMMAND *pSubmitCommand)
 {
     VIOGPU_ASSERT(pSubmitCommand != NULL);
+
+    // Tripwire for the pDmaBufferPrivateData handoff: it is sound only while each
+    // DMA buffer carries a single submission starting at offset 0. A non-zero
+    // start means the scheduler packed or split submissions into one buffer, which
+    // would make the per-buffer private-data slot ambiguous.
+    ASSERT(pSubmitCommand->DmaBufferSubmissionStartOffset == 0);
 
 #if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WIN8)
     UINT nodeOrdinal = pSubmitCommand->NodeOrdinal;

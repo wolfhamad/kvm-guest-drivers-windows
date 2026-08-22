@@ -18,6 +18,7 @@ class VioGpuCommand
 {
   public:
     VioGpuCommand(VioGpuAdapter *adapter);
+    ~VioGpuCommand();
 
     void Run();
 

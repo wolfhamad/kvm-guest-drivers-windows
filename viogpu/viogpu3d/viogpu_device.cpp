@@ -226,6 +226,10 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
                 pPresent->DmaBufferPrivateDataSize >= sizeof(VioGpuCommand *))
             {
                 VioGpuCommand **privateData = (VioGpuCommand **)pPresent->pDmaBufferPrivateData;
+                // Tripwire: the slot must be clean before we stash the command. A
+                // non-NULL slot would mean a reused/offset DMA buffer carried a stale
+                // command -> the pDmaBufferPrivateData handoff would be unsafe.
+                ASSERT(*privateData == NULL);
                 *privateData = cmd;
                 cmd->SetPrivateDataSlot(privateData);
             }
@@ -280,6 +284,10 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
         pPresent->DmaBufferPrivateDataSize >= sizeof(VioGpuCommand *))
     {
         VioGpuCommand **privateData = (VioGpuCommand **)pPresent->pDmaBufferPrivateData;
+        // Tripwire: the slot must be clean before we stash the command. A non-NULL
+        // slot would mean a reused/offset DMA buffer carried a stale command ->
+        // the pDmaBufferPrivateData handoff would be unsafe.
+        ASSERT(*privateData == NULL);
         *privateData = cmd;
         cmd->SetPrivateDataSlot(privateData);
     }
@@ -333,7 +341,12 @@ NTSTATUS VioGpuDevice::Present(_Inout_ DXGKARG_PRESENT *pPresent)
     {
         if (pPresent->pDmaBuffer && dst && src)
         {
-            return GenerateBltPresent(pPresent, src, dst);
+            NTSTATUS status = GenerateBltPresent(pPresent, src, dst);
+            if (!NT_SUCCESS(status))
+            {
+                delete cmd;
+            }
+            return status;
         }
     }
     else
@@ -455,6 +468,10 @@ NTSTATUS VioGpuDevice::Render(DXGKARG_RENDER *pRender)
     if (pRender->pDmaBufferPrivateData)
     {
         VioGpuCommand **privateData = (VioGpuCommand **)pRender->pDmaBufferPrivateData;
+        // Tripwire: the slot must be clean before we stash the command. A non-NULL
+        // slot would mean a reused/offset DMA buffer carried a stale command ->
+        // the pDmaBufferPrivateData handoff would be unsafe.
+        ASSERT(*privateData == NULL);
         *privateData = cmd;
         cmd->SetPrivateDataSlot(privateData);
     }
