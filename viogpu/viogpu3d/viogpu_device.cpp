@@ -485,6 +485,8 @@ NTSTATUS VioGpuDevice::OpenAllocation(_In_ CONST DXGKARG_OPENALLOCATION *pOpenAl
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
+    NTSTATUS status = STATUS_SUCCESS;
+
     for (UINT i = 0; i < pOpenAllocation->NumAllocations; i++)
     {
         DXGK_OPENALLOCATIONINFO *openAllocationInfo = &pOpenAllocation->pOpenAllocation[i];
@@ -493,28 +495,31 @@ NTSTATUS VioGpuDevice::OpenAllocation(_In_ CONST DXGKARG_OPENALLOCATION *pOpenAl
         if (!allocation)
         {
             DbgPrint(TRACE_LEVEL_ERROR, ("%s missing allocation handle=%p\n", __FUNCTION__, openAllocationInfo->hAllocation));
-            goto fail;
-        }
-
-        VioGpuDeviceAllocation *devAlloc = new (NonPagedPoolNx) VioGpuDeviceAllocation(this, allocation);
-        openAllocationInfo->hDeviceSpecificAllocation = devAlloc;
-
-        if (!devAlloc)
-        {
-            DbgPrint(TRACE_LEVEL_ERROR, ("%s failed to create device allocation\n", __FUNCTION__));
+            status = STATUS_INVALID_HANDLE;
             goto fail;
         }
 
         if (allocation->IsBlob())
         {
-            allocation->EnsureBlobCreated(GetId());
-            if (!allocation->IsBlobCreated() && !allocation->IsBlobPending())
+            status = allocation->EnsureBlobCreatedAndWait(GetId());
+            if (!NT_SUCCESS(status))
             {
                 DbgPrint(TRACE_LEVEL_ERROR,
-                         ("%s blob create failed res_id=0x%x\n", __FUNCTION__, allocation->GetId()));
+                         ("%s blob create failed status=0x%x res_id=0x%x\n",
+                          __FUNCTION__, status, allocation->GetId()));
                 goto fail;
             }
         }
+
+        VioGpuDeviceAllocation *devAlloc = new (NonPagedPoolNx) VioGpuDeviceAllocation(this, allocation);
+        if (!devAlloc)
+        {
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s failed to create device allocation\n", __FUNCTION__));
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            goto fail;
+        }
+
+        openAllocationInfo->hDeviceSpecificAllocation = devAlloc;
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
@@ -531,7 +536,7 @@ fail:
         }
     }
     DbgPrint(TRACE_LEVEL_ERROR, ("<--- %s failed\n", __FUNCTION__));
-    return STATUS_INSUFFICIENT_RESOURCES;
+    return status;
 }
 
 CtrlQueue *VioGpuDevice::GetCtrlQueue()
@@ -552,7 +557,6 @@ VioGpuDeviceAllocation::VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAlloc
     m_pDevice = device;
     m_attached = false;
 
-    m_pAllocation->EnsureBlobCreated(m_pDevice->GetId());
     if (m_pAllocation->IsBlob() || !m_pDevice->IsVenusContext())
     {
         m_pDevice->GetCtrlQueue()->CtxResource(true, m_pDevice->GetId(), m_pAllocation->GetId());

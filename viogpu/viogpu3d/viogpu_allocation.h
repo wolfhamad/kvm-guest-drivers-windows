@@ -92,6 +92,7 @@ class VioGpuAllocation
     }
 
     void EnsureBlobCreated(ULONG ctx_id);
+    NTSTATUS EnsureBlobCreatedAndWait(ULONG ctx_id);
     NTSTATUS CreateBlobResource(UINT ctx_id,
                                 void (*complete_cb)(void *) = NULL,
                                 void *complete_ctx = NULL);
@@ -124,6 +125,7 @@ class VioGpuAllocation
 
   private:
     static void BlobCreateCompleteCB(void *ctx_void);
+    void WaitForPendingBlobCreate();
     struct BlobUserMapping
     {
         LIST_ENTRY ListEntry;
@@ -156,6 +158,8 @@ class VioGpuAllocation
     bool m_blob_created;
     NTSTATUS m_blob_create_status;
     volatile LONG m_blob_create_state;
+    KEVENT m_blob_create_complete_event;
+    EX_RUNDOWN_REF m_blob_create_rundown;
     FAST_MUTEX m_blob_map_mutex;
     LIST_ENTRY m_blob_map_list;
     ULONG m_blob_map_user_refs;

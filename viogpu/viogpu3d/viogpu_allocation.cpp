@@ -48,7 +48,11 @@ static void VioGpuGetTargetProcess(VioGpuDevice *device, PEPROCESS *out_process,
 void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
 {
     PVIOGPU_COMPLETE_CTX ctx = (PVIOGPU_COMPLETE_CTX)ctx_void;
-    if (!ctx || !ctx->owner) {
+    if (!ctx) {
+        return;
+    }
+    if (!ctx->owner) {
+        delete ctx;
         return;
     }
 
@@ -69,6 +73,7 @@ void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
         InterlockedExchange(&alloc->m_blob_create_state, 0);
     }
 
+    KeSetEvent(&alloc->m_blob_create_complete_event, IO_NO_INCREMENT, FALSE);
     if (ctx->user_cb) {
         ctx->user_cb(ctx->user_ctx);
     }
@@ -76,6 +81,7 @@ void VioGpuAllocation::BlobCreateCompleteCB(void *ctx_void)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s res_id=0x%x\n", __FUNCTION__, alloc->GetId()));
 
     delete ctx;
+    ExReleaseRundownProtection(&alloc->m_blob_create_rundown);
 }
 
 VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCATION_EXCHANGE *exchange)
@@ -101,6 +107,8 @@ VioGpuAllocation::VioGpuAllocation(VioGpuAdapter *adapter, VIOGPU_CREATE_ALLOCAT
     m_blob_created = false;
     m_blob_create_status = STATUS_PENDING;
     m_blob_create_state = 0;
+    KeInitializeEvent(&m_blob_create_complete_event, NotificationEvent, TRUE);
+    ExInitializeRundownProtection(&m_blob_create_rundown);
     ExInitializeFastMutex(&m_blob_map_mutex);
     InitializeListHead(&m_blob_map_list);
     m_blob_map_user_refs = 0;
@@ -154,12 +162,22 @@ NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
                                               void (*complete_cb)(void *),
                                               void *complete_ctx)
 {
+    if (!ExAcquireRundownProtection(&m_blob_create_rundown))
+    {
+        return STATUS_DELETE_PENDING;
+    }
+
+    KeClearEvent(&m_blob_create_complete_event);
     LONG prev_state = InterlockedCompareExchange(&m_blob_create_state, 1, 0);
     if (prev_state == 1) {
+        ExReleaseRundownProtection(&m_blob_create_rundown);
         return STATUS_PENDING;
     }
     if (prev_state == 2) {
-        return m_blob_created ? STATUS_SUCCESS : m_blob_create_status;
+        KeSetEvent(&m_blob_create_complete_event, IO_NO_INCREMENT, FALSE);
+        NTSTATUS status = m_blob_created ? STATUS_SUCCESS : m_blob_create_status;
+        ExReleaseRundownProtection(&m_blob_create_rundown);
+        return status;
     }
 
     m_blob_create_status = STATUS_PENDING;
@@ -168,8 +186,10 @@ NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
 
     PVIOGPU_COMPLETE_CTX ctx = new (NonPagedPoolNx) VIOGPU_COMPLETE_CTX();
     if (!ctx) {
-        m_blob_create_status = status;
+        m_blob_create_status = STATUS_INSUFFICIENT_RESOURCES;
         InterlockedExchange(&m_blob_create_state, 0);
+        KeSetEvent(&m_blob_create_complete_event, IO_NO_INCREMENT, FALSE);
+        ExReleaseRundownProtection(&m_blob_create_rundown);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
     ctx->vbuf = NULL;
@@ -190,10 +210,13 @@ NTSTATUS VioGpuAllocation::CreateBlobResource(UINT ctx_id,
     if (!NT_SUCCESS(status)) {
         m_blob_create_status = status;
         InterlockedExchange(&m_blob_create_state, 0);
+        KeSetEvent(&m_blob_create_complete_event, IO_NO_INCREMENT, FALSE);
         delete ctx;
+        ExReleaseRundownProtection(&m_blob_create_rundown);
         return status;
     }
 
+    // The completion callback owns the rundown reference after the request is queued.
     return status;
 }
 
@@ -210,11 +233,53 @@ void VioGpuAllocation::EnsureBlobCreated(ULONG ctx_id)
     }
 }
 
+NTSTATUS VioGpuAllocation::EnsureBlobCreatedAndWait(ULONG ctx_id)
+{
+    if (!m_is_blob)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    EnsureBlobCreated(ctx_id);
+    WaitForPendingBlobCreate();
+
+    if (!m_blob_created)
+    {
+        return NT_SUCCESS(m_blob_create_status) ? STATUS_UNSUCCESSFUL : m_blob_create_status;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+void VioGpuAllocation::WaitForPendingBlobCreate()
+{
+    if (!m_is_blob || InterlockedCompareExchange(&m_blob_create_state, 1, 1) != 1)
+    {
+        return;
+    }
+
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+    if (KeGetCurrentIrql() > APC_LEVEL)
+    {
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s cannot wait for pending blob create at IRQL=%u res_id=0x%x\n",
+                  __FUNCTION__,
+                  KeGetCurrentIrql(),
+                  m_Id));
+        return;
+    }
+
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("%s waiting for pending blob create res_id=0x%x\n", __FUNCTION__, m_Id));
+    KeWaitForSingleObject(&m_blob_create_complete_event, Executive, KernelMode, FALSE, NULL);
+}
+
 VioGpuAllocation::~VioGpuAllocation(void)
 {
     DbgPrint(TRACE_LEVEL_INFORMATION, ("---> %s res_id=0x%x\n", __FUNCTION__, m_Id));
 
     ASSERT(m_busy == 0);
+    ExWaitForRundownProtectionRelease(&m_blob_create_rundown);
 
     ExAcquireFastMutex(&m_blob_map_mutex);
     if (!IsListEmpty(&m_blob_map_list))
@@ -744,9 +809,13 @@ NTSTATUS VioGpuAllocation::EscapeResourceSetScanoutBlob(VIOGPU_RES_SET_SCANOUT_B
     {
         return STATUS_NOT_SUPPORTED;
     }
-    if (!m_blob_created && m_blob_create_state == 0)
+    WaitForPendingBlobCreate();
+    if (!m_blob_created)
     {
-        return STATUS_UNSUCCESSFUL;
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s blob is not created res_id=0x%x status=0x%x\n",
+                  __FUNCTION__, m_Id, m_blob_create_status));
+        return NT_SUCCESS(m_blob_create_status) ? STATUS_UNSUCCESSFUL : m_blob_create_status;
     }
 
     FlushToScreen(resScanout->ScanoutId,
@@ -799,9 +868,13 @@ NTSTATUS VioGpuAllocation::EscapeResourceMapBlob(VIOGPU_RES_MAP_BLOB_REQ *resMap
     {
         return STATUS_NOT_SUPPORTED;
     }
-    if (!m_blob_created && m_blob_create_state == 0)
+    NTSTATUS blob_status = EnsureBlobCreatedAndWait(device ? device->GetId() : 0);
+    if (!NT_SUCCESS(blob_status))
     {
-        return STATUS_UNSUCCESSFUL;
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s blob create failed status=0x%x res_id=0x%x\n",
+                  __FUNCTION__, blob_status, m_Id));
+        return blob_status;
     }
 
     const ULONGLONG requested_size = resMap->Size ? resMap->Size : m_blob_size;
