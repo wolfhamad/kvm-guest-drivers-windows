@@ -21,7 +21,8 @@ VioGpuDevice::VioGpuDevice(VioGpuAdapter *pAdapter)
     m_owner_pid = PsGetCurrentProcessId();
     ObReferenceObject(m_owner_process);
     m_id = pAdapter->ctxIdr.GetId();
-    pAdapter->ctrlQueue.CreateCtx(m_id, 0);
+    m_capset_id = 0;
+    m_context_created = false;
 }
 
 VioGpuDevice::~VioGpuDevice()
@@ -29,7 +30,11 @@ VioGpuDevice::~VioGpuDevice()
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--> %s\n", __FUNCTION__));
 
-    m_pAdapter->ctrlQueue.DestroyCtx(m_id);
+    if (m_context_created)
+    {
+        m_pAdapter->ctrlQueue.DestroyCtx(m_id);
+        m_context_created = false;
+    }
     m_pAdapter->ctxIdr.PutId(m_id);
     if (m_owner_process)
     {
@@ -45,10 +50,16 @@ NTSTATUS VioGpuDevice::Init(VIOGPU_CTX_INIT_REQ *pOptions)
 
     UINT context_init = 0;
 
-    context_init |= pOptions->CapsetID;
+    m_capset_id = pOptions->CapsetID;
+    context_init |= m_capset_id;
 
-    m_pAdapter->ctrlQueue.DestroyCtx(m_id); // Destroy old viogpu context
+    if (m_context_created)
+    {
+        m_pAdapter->ctrlQueue.DestroyCtx(m_id);
+        m_context_created = false;
+    }
     m_pAdapter->ctrlQueue.CreateCtx(m_id, context_init);
+    m_context_created = true;
 
     return STATUS_SUCCESS;
 }
@@ -535,9 +546,14 @@ VioGpuDeviceAllocation::VioGpuDeviceAllocation(VioGpuDevice *device, VioGpuAlloc
 
     m_pAllocation = allocation;
     m_pDevice = device;
+    m_attached = false;
 
     m_pAllocation->EnsureBlobCreated(m_pDevice->GetId());
-    m_pDevice->GetCtrlQueue()->CtxResource(true, m_pDevice->GetId(), m_pAllocation->GetId());
+    if (m_pAllocation->IsBlob() || !m_pDevice->IsVenusContext())
+    {
+        m_pDevice->GetCtrlQueue()->CtxResource(true, m_pDevice->GetId(), m_pAllocation->GetId());
+        m_attached = true;
+    }
 }
 
 VioGpuDeviceAllocation::~VioGpuDeviceAllocation()
@@ -546,7 +562,11 @@ VioGpuDeviceAllocation::~VioGpuDeviceAllocation()
     DbgPrint(TRACE_LEVEL_VERBOSE,
              ("<---> %s res_id=%d ctx_id=%d\n", __FUNCTION__, m_pAllocation->GetId(), m_pDevice->GetId()));
 
-    m_pDevice->GetCtrlQueue()->CtxResource(false, m_pDevice->GetId(), m_pAllocation->GetId());
+    if (m_attached)
+    {
+        m_pDevice->GetCtrlQueue()->CtxResource(false, m_pDevice->GetId(), m_pAllocation->GetId());
+        m_attached = false;
+    }
 }
 
 VioGpuAllocation *VioGpuDeviceAllocation::GetAllocation()

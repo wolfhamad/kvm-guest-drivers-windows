@@ -273,12 +273,6 @@ NTSTATUS VioGpuAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
         return Status;
     }
 
-    if (!AckFeature(VIRTIO_GPU_F_VIRGL))
-    {
-        DbgPrint(TRACE_LEVEL_ERROR, ("VioGpu3D cannot start because virgl is not enabled\n"));
-        return STATUS_UNSUCCESSFUL;
-    }
-
     Status = SetRegisterInfo(GetInstanceId(), 0);
     if (!NT_SUCCESS(Status))
     {
@@ -572,7 +566,7 @@ NTSTATUS VioGpuAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQ
                 /* Driver implements the capset query fix; gate it on 3D */
                 info->Flags.has_capset_query_fix = info->Flags.Supports3d;
                 info->Flags.has_context_init =
-                   virtio_is_feature_enabled(m_u64HostFeatures, VIRTIO_GPU_F_CONTEXT_INIT);
+                   virtio_is_feature_enabled(m_u64GuestFeatures, VIRTIO_GPU_F_CONTEXT_INIT);
                 info->Flags.has_host_visible =
                    (m_VioDev.shmem_len && m_PciResources.GetPciBar(m_VioDev.shmem_bar));
                 info->Flags.has_resource_assign_uuid =
@@ -1785,6 +1779,17 @@ NTSTATUS VioGpuAdapter::VioGpuAdapterInit()
     do
     {
         struct virtqueue *vqs[2];
+        if (!AckFeature(VIRTIO_GPU_F_VIRGL))
+        {
+            DbgPrint(TRACE_LEVEL_ERROR, ("VioGpu3D cannot start because virgl is not enabled\n"));
+            status = STATUS_NOT_SUPPORTED;
+            break;
+        }
+        if (!AckFeature(VIRTIO_GPU_F_CONTEXT_INIT))
+        {
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("VIRTIO_GPU_F_CONTEXT_INIT not supported; Venus contexts are unavailable\n"));
+        }
         if (!AckFeature(VIRTIO_GPU_F_RESOURCE_BLOB))
         {
             DbgPrint(TRACE_LEVEL_ERROR, ("VIRTIO_GPU_F_RESOURCE_BLOB not supported by host\n"));
