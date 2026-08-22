@@ -1562,6 +1562,11 @@ void VioGpuQueue::ReleaseBuffer(PGPU_VBUFFER buf)
 {
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
+    if (buf == NULL)
+    {
+        return;
+    }
+
     m_pBuf->FreeBuf(buf);
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
@@ -2014,10 +2019,15 @@ BOOLEAN VioGpuObj::Init(_In_ UINT size, VioGpuMemSegment *pSegment)
     ASSERT(pSegment);
     UINT pages = BYTES_TO_PAGES(size);
     size = pages * PAGE_SIZE;
-    if (size > pSegment->GetSize())
+    if (!pSegment || size > pSegment->GetSize())
     {
+        // NB: log pSegment, not m_pSegment -- m_pSegment is still NULL here (it
+        // is assigned below), so dereferencing it would bugcheck.
         DbgPrint(TRACE_LEVEL_FATAL,
-                 ("<--- %s segment size too small = %Iu (%u)\n", __FUNCTION__, m_pSegment->GetSize(), size));
+                 ("<--- %s segment size too small = %Iu (%u)\n",
+                  __FUNCTION__,
+                  pSegment ? pSegment->GetSize() : 0,
+                  size));
         return FALSE;
     }
     m_pSegment = pSegment;
