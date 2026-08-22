@@ -35,6 +35,14 @@
 #include "baseobj.h"
 #include "viogpu_adapter.h"
 #include "viogpu_device.h"
+#include "driver.tmh"
+
+#if DBG
+#undef DbgPrint
+#define DbgPrint(Level, MSG) VIOGPU_DEBUG_PRINT(Level, MSG)
+#endif
+
+static PDRIVER_OBJECT g_VioGpu3DDriverObject;
 
 #pragma code_seg(push)
 #pragma code_seg("INIT")
@@ -76,7 +84,9 @@ void InitializeDebugPrints(IN PDRIVER_OBJECT DriverObject, IN PUNICODE_STRING Re
 extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_STRING *pRegistryPath)
 {
     PAGED_CODE();
+    g_VioGpu3DDriverObject = pDriverObject;
     VIOGPU_TRACE_INIT(pDriverObject, pRegistryPath);
+    WPP_INIT_TRACING(pDriverObject, pRegistryPath);
     DbgPrint(TRACE_LEVEL_FATAL, ("---> VIOGPU FULL build on on %s %s\n", __DATE__, __TIME__));
     DRIVER_INITIALIZATION_DATA InitialData = {0};
 
@@ -174,6 +184,11 @@ VOID VioGpu3DUnload(VOID)
     PAGED_CODE();
     DbgPrint(TRACE_LEVEL_INFORMATION, ("<--> %s\n", __FUNCTION__));
     VIOGPU_TRACE_CLEANUP(NULL);
+    if (g_VioGpu3DDriverObject)
+    {
+        WPP_CLEANUP(g_VioGpu3DDriverObject);
+        g_VioGpu3DDriverObject = NULL;
+    }
 }
 
 NTSTATUS
