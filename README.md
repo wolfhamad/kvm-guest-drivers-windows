@@ -1,134 +1,238 @@
-# About
+# Yttrium: Direct3D acceleration for Windows on KVM/QEMU
 
-This project is an effort to bring paravirtualized 3d acceleration to Windows guests. Right now it provides OpenGL/Virgl and Vulkan/Venus in addition to llvmpipe and lavapipe.
+> **Alpha software:** a Windows virtual machine should not have to look like one.
 
-Also note this project is still under development and there are numerous bugs that will crash or hang the guest so **do not use it** for produciton work.
+Yttrium brings hardware-accelerated **Direct3D 9, 10, and 11, Vulkan, and
+OpenGL** graphics to Windows guests using a paravirtualized VirtIO GPU. Its
+Direct3D driver uses the Venus protocol to carry graphics work to the host's
+Vulkan GPU without dedicating a physical GPU to the guest.
 
-Any contributions are welcome. I will happily **take merge requests**. In this project there are only two rules:
+The goal is simple: a responsive Windows desktop, smooth 3D applications, and
+modern visual effects inside an ordinary KVM/QEMU virtual machine.
 
-1.  It builds and run
-2.  Avoid touching mesa core code
+## Components
 
-<img src="viogpu3d.png" width="800" alt="viogpu3d" />
+Yttrium spans several repositories; this KMD repository is only one part of
+the complete stack.
 
-# Win10 viogpu3d driver installation
+| Component | Repository | Purpose |
+| --- | --- | --- |
+| Windows KMD | This repository | WDDM device, memory, scheduling, and display integration |
+| Mesa UMD | [virtio-win-mesa, `yttrium-experimental`](https://github.com/arehnman/virtio-win-mesa/tree/yttrium-experimental) | Direct3D, Vulkan, and OpenGL user-mode drivers |
+| QEMU | [yttrium-qemu, `yttrium`](https://github.com/arehnman/yttrium-qemu/tree/yttrium) | VirtIO GPU device and nonblocking display integration |
+| virglrenderer | [virglrenderer, `yttrium`](https://github.com/arehnman/virglrenderer/tree/yttrium) | Venus renderer and cross-context resource sharing |
+| Host bundle | [yttrium-qemu-flatpak](https://github.com/arehnman/yttrium-qemu-flatpak) | Reproducible QEMU and virglrenderer Flatpak build |
 
-Install VirtIOTestCert.cer in Trusted Root Certification Authorities  
-_The certificate is provided in the zip file or in the source tree_  
+## See Yttrium in action
 
-Disable secure boot in UEFI settings  
+These scenes are rendered inside a Windows guest through the Yttrium Direct3D
+driver, not on the Linux host desktop.
 
-Enable test signing mode and reboot  
-_bcdedit /set testsigning on_  
+![Unigine Superposition rendering through Yttrium in a Windows guest](docs/images/yttrium-unigine-superposition.png)
 
-Install Windows Graphics Tools  
-_Settings -> Apps -> Optional features -> Add a feature and search for "Graphics Tools"._  
-_Click Install_
+_Complex materials, reflections, depth of field, particles, and millions of triangles in Unigine Superposition._
 
-Windows graphics tools is apparently required for debug builds...  
+![Unigine Sanctuary rendering through Yttrium in a Windows guest](docs/images/yttrium-unigine-sanctuary.png)
 
-Install the viogpu3d driver  
-_Open device manager and select the display adapter -> Update driver -> Browse my computer for drivers._
+_Dynamic lighting, shadows, fire, fog, and stained-glass reflections in Unigine Sanctuary._
 
-If you have an old version of the viogpu3d driver first uninstall it and make sure to delete the old driver.
+## What Yttrium offers
 
-# Vulkan Runtime installer
+*   **Direct3D 9, 10, and 11:** run a broad range of Windows 3D applications and
+    older games through the standard Windows graphics APIs they already use.
+*   **Real host-GPU acceleration:** demanding rendering work is sent through
+    Vulkan/Venus to the host GPU instead of being drawn entirely by the guest CPU.
+*   **No dedicated GPU required:** the VirtIO model is designed to share graphics
+    capability with a VM rather than reserve a physical card for passthrough.
+*   **An easier host setup:** the Yttrium QEMU Flatpak packages QEMU and
+    virglrenderer together, avoiding the work of building both projects yourself.
+*   **32-bit and 64-bit application support:** one driver package covers both
+    generations of Windows software.
+*   **More than Direct3D:** the Yttrium stack also includes OpenGL through Zink
+    and Vulkan through Venus.
+*   **Open and built on Mesa:** the graphics stack is inspectable, hackable, and
+    open to contributions.
 
-*   Download and run the Vulkan Runtime Installer from [https://vulkan.lunarg.com/sdk/home](https://vulkan.lunarg.com/sdk/home)  
-    _The Vulkan Runtime provides the vulkan-1.dll loader and vulkaninfo utility_
+## How it works
 
-# Linux host requirements
+Yttrium acts as an interpreter between a Windows application and the host GPU.
+Direct3D calls enter Mesa's Gallium graphics layer; shaders are translated through
+NIR into SPIR-V; and Venus carries the resulting Vulkan work across the VM boundary.
+VirtIO shared resources then connect the rendered image to the Windows display.
 
-*   To use Vulkan/Venus with qemu, virglrenderer on the host has to be built with venus support.  
-    _Tip: To make sure your host environment is correct try first installing an Ubuntu guest with venus enabled and run for instance vkcube._
+That path supports everyday presentation as well as advanced 3D work such as
+programmable shaders, multiple render targets, depth and stencil buffers,
+multisampling, compute workloads, texture compression, and stream output.
 
+The Yttrium graphics driver requires a modified virglrenderer on the host to
+provide cross-context resource sharing. The Flatpak build packages the matching
+QEMU and virglrenderer revisions together. QEMU also carries a small patch that
+prevents its display path from blocking the Windows guest when the display
+window is hidden or minimized.
+
+## Project status
+
+Yttrium is active, experimental driver work. The alpha has passed the project's
+Direct3D Wine test suites and runs complex applications and benchmarks, but it
+still has bugs and may crash or hang a guest. **Do not use it for production
+work or with data you cannot afford to lose.**
+
+The current qualification target is a Windows 10 x64 guest on an Intel Arc A580
+host. Other Vulkan-capable host GPUs and Windows configurations may work, but
+have not received the same testing.
+
+Contributions and merge requests are very welcome. This project has two simple
+rules:
+
+1.  It builds and runs.
+2.  Avoid changes to Mesa core code when the work can live in Yttrium.
+
+![Vulkan applications running in a Windows QEMU guest with viogpu3d](viogpu3d.png)
+
+_The wider Yttrium stack running Vulkan workloads alongside the Windows desktop._
+
+## Windows 10 Yttrium driver installation
+
+Download the alpha driver archive from this repository's
+[Releases](https://github.com/arehnman/kvm-guest-drivers-windows/releases)
+page and extract it in the guest.
+
+Install `VirtIOTestCert.cer` in **Trusted Root Certification Authorities**.
+The certificate is included in the release archive and source tree. The alpha
+driver is test-signed; it is not Microsoft-signed.
+
+Disable Secure Boot in the VM's UEFI settings.
+
+Enable Windows test-signing mode from an administrator command prompt, then
+reboot:
+
+```bat
+bcdedit /set testsigning on
 ```
-meson setup build -Dvenus=true
-meson compile -C build
-meson install -C build
+
+In Device Manager, select the display adapter and choose **Update driver >
+Browse my computer for drivers**, then point Windows to the extracted Yttrium
+driver directory.
+
+If an older Yttrium release is installed, uninstall it first and select the
+option to delete the old driver package. Reboot after installation.
+
+## Vulkan runtime installer
+
+Download and run the [Vulkan Runtime Installer](https://vulkan.lunarg.com/sdk/home).
+It provides the `vulkan-1.dll` loader and the `vulkaninfo` utility.
+
+## Linux host setup
+
+The recommended alpha configuration uses the Yttrium Flatpak so that QEMU and
+virglrenderer remain at compatible revisions. Download
+`org.qemu.yttrium.flatpak` from the
+[Yttrium QEMU Flatpak releases](https://github.com/arehnman/yttrium-qemu-flatpak/releases),
+then install it for the current user:
+
+```sh
+flatpak install --user ./org.qemu.yttrium.flatpak
 ```
 
-# QEMU setup
+Verify the installation:
 
-*   For QEMU to be able to use Vulkan/Venus the guest VM needs host shared memory enabled. Below is an example:
-
+```sh
+flatpak run org.qemu.yttrium --version
 ```
+
+The optional `org.qemu.yttrium.Debug.flatpak` release asset contains host debug
+symbols. Developers who want to build the host stack can use the
+[Flatpak source repository](https://github.com/arehnman/yttrium-qemu-flatpak).
+
+Recent official QEMU builds can also run Yttrium, but they must use a locally
+built copy of the
+[Yttrium virglrenderer](https://github.com/arehnman/virglrenderer/tree/yttrium).
+Unlike the Yttrium Flatpak, official QEMU builds do not include the display
+progress patch. An invisible, hidden, or minimized display window may therefore
+stall the guest; keep the display visible while running graphics workloads.
+
+## QEMU setup
+
+Vulkan/Venus requires host-shared memory for the guest VM. This minimal example
+uses the Yttrium Flatpak and exposes 4 GiB of host-visible graphics memory:
+
+```sh
 IMG=win10-box.qcow2
 ISO=Win10_22H2_English_x64.iso
 
-qemu-system-x86_64                                               \
+flatpak run org.qemu.yttrium                                     \
     -enable-kvm                                                  \
     -smp 4                                                       \
     -m 8G                                                        \
-    -cpu host,migratable=on,hv-time=on,hv-relaxed=on,hv-vapic=on,hv-spinlocks=0x1fff \
-    -machine pc-q35-8.0,usb=off,vmport=off,dump-guest-core=off,memory-backend=mem1,hpet=off,acpi=on \
-    -net nic,model=e1000e                                        \
-    -net user,hostfwd=tcp::2222-:22                              \
-    -device virtio-vga-gl,hostmem=4G,blob=true,venus=true        \
-    -vga none                                                    \
-    -boot strict=on                                              \
-    -display gtk,gl=on,show-cursor=off                           \
-    -usb -device usb-tablet                                      \
-    -chardev pty,id=charserial0                                  \
-    -device '{"driver":"isa-serial","chardev":"charserial0","id":"serial0","index":0}' \
-    -chardev socket,id=charserial1,path=/tmp/windbg              \
-    -device '{"driver":"isa-serial","chardev":"charserial1","id":"serial1","index":1}' \
+    -cpu host                                                    \
     -object memory-backend-memfd,id=mem1,size=8G,share=on        \
-    -hda $IMG                                                    \
-    -cdrom $ISO                                                  \
-    -chardev socket,id=chr-vu-fs0,path=fs0-fs.sock               \
-    -device '{"driver":"vhost-user-fs-pci","id":"fs0","chardev":"chr-vu-fs0","tag":"temp"}' \
+    -machine q35,memory-backend=mem1                             \
+    -device virtio-vga-gl,hostmem=4G,blob=on,venus=on            \
+    -vga none                                                    \
+    -display gtk,gl=on                                           \
+    -device usb-tablet                                           \
+    -netdev user,id=net0,hostfwd=tcp::2222-:22                   \
+    -device e1000e,netdev=net0                                   \
+    -drive file="$IMG",if=ide                                   \
+    -cdrom "$ISO"                                                \
     -d guest_errors
 ```
 
-# Testing
+Adjust storage, networking, audio, firmware, and memory settings for your VM.
+The essential Yttrium options are the shared memory backend and
+`virtio-vga-gl` with `blob`, `venus`, and a nonzero `hostmem` aperture.
 
-*   Install FurMark 2
+## Testing
 
-```
-cd <insert path here>\FurMark_2.9.0.0_win64\FurMark_win64
+FurMark 2.9.0 is a useful Vulkan/OpenGL smoke test. Version 2.10.2 currently
+contains a Vulkan feature-negotiation crash on this configuration, so it is not
+the alpha reference version.
+
+```bat
+cd C:\path\to\FurMark_2.9.0.0_win64\FurMark_win64
+
+furmark --vkinfo
+
+furmark --glinfo
 
 furmark --demo furmark-vk
 
 furmark --demo furmark-gl
 ```
 
-*   There is also a modified version of vkcube in a adjacent repository (vulkan-tools)
+`--vkinfo` should list the host GPU as a `Virtio-GPU Venus (...)` Vulkan
+device. The number of listed devices depends on the host configuration.
+`--glinfo` should report `Mesa` as `GL_VENDOR` and a `zink Vulkan ...
+(Virtio-GPU Venus (...))` renderer using the intended host GPU. These commands
+are useful for separating Vulkan device-discovery problems from OpenGL/Zink
+adapter-selection problems before running the graphical demos.
 
-# KVM/QEMU Windows guest drivers (virtio-win)
+A modified `vkcube` is also available in the
+[Vulkan-Tools fork](https://github.com/arehnman/Vulkan-Tools).
 
-This repository contains KVM/QEMU Windows guest drivers, for both  
-paravirtual and emulated hardware. The code builds and ships as part  
-of the virtio-win RPM on Fedora and Red Hat Enterprise Linux, and the  
-binaries are also available in the form of distribution-neutral ISO  
-and VFD images. If all you want is use virtio-win in your Windows  
-virtual machines, go to the  
-[Fedora virtIO-win documentation](https://docs.fedoraproject.org/en-US/quick-docs/creating-windows-virtual-machines-using-virtio-drivers/index.html)  
-for information on obtaining the binaries.
+## About this repository
 
-If you'd like to build virtio-win from sources, clone this repo and  
-follow the instructions in [Building the Drivers](https://virtio-win.github.io/Development/Building-the-drivers-using-Windows-11-24H2-EWDK).  
-Note that the drivers you build will be either unsigned or test-signed  
-with Tools/VirtIOTestCert.cer, which means that Windows will not load  
-them by default. See [Microsoft's driver signing page](https://docs.microsoft.com/en-us/windows-hardware/drivers/install/installing-test-signed-driver-packages)  
-for more information on test-signing.
+This is a development fork of
+[virtio-win/kvm-guest-drivers-windows](https://github.com/virtio-win/kvm-guest-drivers-windows).
+The Yttrium driver is not part of the official Fedora or Red Hat virtio-win
+packages and is not supported by those projects. Use the
+[Fedora virtio-win documentation](https://docs.fedoraproject.org/en-US/quick-docs/creating-windows-virtual-machines-using-virtio-drivers/index.html)
+for stable, non-Yttrium guest drivers.
 
-If you want to build cross-signed binaries (like the ones that ship in  
-the Fedora RPM), you'll need your own code-signing certificate.  
-Cross-signed drivers can be used on all versions of Windows except for  
-the latest Windows 10 with secure boot enabled. However, systems with  
-cross-signed drivers will not receive Microsoft support.
+To build this fork from source, follow the upstream
+[Windows 11 24H2 EWDK build instructions](https://virtio-win.github.io/Development/Building-the-drivers-using-Windows-11-24H2-EWDK).
+Locally built drivers are unsigned or test-signed and Windows will not load them
+under its normal production signing policy.
 
-If you want to produce Microsoft-signed binaries (fully supported,  
-like the ones that ship in the Red Hat Enterprise Linux RPM), you'll  
-need to submit the drivers to Microsoft along with a set of test  
-results (so called WHQL process). If you decide to WHQL the drivers,  
-make sure to base them on commit eb2996de or newer, since the GPL  
-license used prior to this commit is not compatible with WHQL.  
-Additionally, we ask that you make a change to the Hardware IDs so  
-that your drivers will _not_ match devices exposed by the upstream  
-versions of KVM/QEMU. This is especially important if you plan to  
-distribute the drivers with Windows Update, see the  
-[Microsoft publishing restrictions](https://docs.microsoft.com/en-us/windows-hardware/drivers/dashboard/publishing-restrictions) for more details.
+## Licensing
 
----
+This fork retains the upstream copyright and BSD-3-Clause notices. Yttrium
+changes to `viogpu3d` are additionally covered by MPL-2.0 where marked in the
+source files. Individual file headers are authoritative.
+
+## Contributing
+
+Bug reports and merge requests are welcome. Please include the guest Windows
+version, host GPU and Vulkan driver, QEMU and virglrenderer revisions, and the
+smallest reproducible workload. Never test a suspected hang with valuable guest
+data.
