@@ -40,20 +40,20 @@ if ([string]::IsNullOrWhiteSpace($MesaArch)) {
 switch ($MesaArch) {
   'x86_64' {
     $icdFiles = @(
-      @{ Name = 'virtio_icd.x86_64.json'; Legacy = @(); Dll = 'libvulkan_virtio.dll' },
-      @{ Name = 'lvp_icd.x86_64.json'; Legacy = @(); Dll = 'vulkan_lvp.dll' }
+      @{ Name = 'virtio_icd.x86_64.json'; Legacy = @(); Dll = 'libvulkan_virtio.dll'; Optional = $false },
+      @{ Name = 'lvp_icd.x86_64.json'; Legacy = @(); Dll = 'vulkan_lvp.dll'; Optional = $true }
     )
   }
   'aarch64' {
     $icdFiles = @(
-      @{ Name = 'virtio_icd.aarch64.json'; Legacy = @(); Dll = 'libvulkan_virtio.dll' },
-      @{ Name = 'lvp_icd.aarch64.json'; Legacy = @(); Dll = 'vulkan_lvp.dll' }
+      @{ Name = 'virtio_icd.aarch64.json'; Legacy = @(); Dll = 'libvulkan_virtio.dll'; Optional = $false },
+      @{ Name = 'lvp_icd.aarch64.json'; Legacy = @(); Dll = 'vulkan_lvp.dll'; Optional = $true }
     )
   }
   'x86' {
     $icdFiles = @(
-      @{ Name = 'virtio_icd.x86.json'; Legacy = @('virtio_icd.i686.json'); Dll = 'libvulkan_virtio.dll' },
-      @{ Name = 'lvp_icd.x86.json'; Legacy = @('lvp_icd.i686.json'); Dll = 'vulkan_lvp.dll' }
+      @{ Name = 'virtio_icd.x86.json'; Legacy = @('virtio_icd.i686.json'); Dll = 'libvulkan_virtio.dll'; Optional = $false },
+      @{ Name = 'lvp_icd.x86.json'; Legacy = @('lvp_icd.i686.json'); Dll = 'vulkan_lvp.dll'; Optional = $true }
     )
   }
   default {
@@ -76,6 +76,14 @@ foreach ($icd in $icdFiles) {
   }
   $dst = Join-Path $OutDir $icd.Name
   $dllPath = Join-Path $binDir $icd.Dll
+
+  if (-not (Test-Path $dllPath) -and $icd.Optional) {
+    if (Test-Path $dst) {
+      Remove-Item -LiteralPath $dst -Force
+    }
+    Write-Host "Skipping optional ICD $($icd.Name): $($icd.Dll) is not staged"
+    continue
+  }
 
   if (-not (Test-Path $src)) {
     throw "Missing source ICD JSON: $src"
