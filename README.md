@@ -110,6 +110,18 @@ reboot:
 bcdedit /set testsigning on
 ```
 
+Disable hibernation and Windows Fast Startup from an administrator command
+prompt:
+
+```bat
+powercfg /hibernate off
+```
+
+Fast Startup is not supported by the alpha driver. It can restore stale guest
+graphics-driver state after QEMU and virglrenderer have started with fresh host
+state, causing resource-allocation failures on the next boot. Use a full
+shutdown or restart instead.
+
 In Device Manager, select the display adapter and choose **Update driver >
 Browse my computer for drivers**, then point Windows to the extracted Yttrium
 driver directory.
